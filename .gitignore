@@ -1,0 +1,26 @@
+# FaceLandmarker model (auto-downloaded by face_mesh_engine.py)
+face_landmarker.task
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
