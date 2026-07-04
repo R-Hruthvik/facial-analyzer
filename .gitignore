@@ -24,3 +24,16 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Results / Uploads
+results/
+
+# MCP
+.playwright-mcp/
+
+# Local Docs / Meta
+*.md
+!README.md
+
+# Self ignore
+.gitignore

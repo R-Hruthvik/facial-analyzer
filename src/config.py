@@ -25,8 +25,22 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 # Remove existing handlers to avoid duplicate logs
 logger.handlers.clear()
 
+class SafeStreamHandler(logging.StreamHandler):
+    """A StreamHandler that doesn't crash if the underlying stream (like stdout/stderr) is closed or unavailable on Windows."""
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            super().flush()
+        except Exception:
+            pass
+
 # Console handler for terminal output
-console_handler = logging.StreamHandler()
+console_handler = SafeStreamHandler()
 console_handler.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 console_formatter = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -83,10 +97,10 @@ class Settings:
     """Downscale factor applied before inference (< 1.0 lowers resolution)."""
 
     # ---- EAR (Eye Aspect Ratio) ---------------------------------------------
-    EAR_THRESHOLD: float = float(os.getenv("EAR_THRESHOLD", "0.20"))
+    EAR_THRESHOLD: float = float(os.getenv("EAR_THRESHOLD", "0.22"))
     """Below this value the eye is considered closed."""
 
-    EAR_CONSECUTIVE_FRAMES: int = int(os.getenv("EAR_CONSECUTIVE_FRAMES", "3"))
+    EAR_CONSECUTIVE_FRAMES: int = int(os.getenv("EAR_CONSECUTIVE_FRAMES", "1"))
     """Number of consecutive frames below threshold to count a blink."""
 
     # ---- MAR (Mouth Aspect Ratio) -------------------------------------------
@@ -95,11 +109,11 @@ class Settings:
 
     # ---- Head Pose -----------------------------------------------------------
     HEAD_PITCH_THRESHOLD: float = float(
-        os.getenv("HEAD_PITCH_THRESHOLD", "30.0")
+        os.getenv("HEAD_PITCH_THRESHOLD", "35.0")
     )
     """Degrees of pitch beyond which the user is looking away."""
 
-    HEAD_YAW_THRESHOLD: float = float(os.getenv("HEAD_YAW_THRESHOLD", "30.0"))
+    HEAD_YAW_THRESHOLD: float = float(os.getenv("HEAD_YAW_THRESHOLD", "35.0"))
     HEAD_ROLL_THRESHOLD: float = float(os.getenv("HEAD_ROLL_THRESHOLD", "30.0"))
 
     # ---- Engagement Score ----------------------------------------------------

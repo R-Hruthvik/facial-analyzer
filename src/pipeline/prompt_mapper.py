@@ -43,13 +43,15 @@ class PromptMapper:
         looking_away_count: int = 0,
         looking_away_ratio: float = 0.0,
         engagement_score: Optional[float] = None,
+        # Extended params — pass from session summary if available
+        duration_seconds: Optional[float] = None,
+        avg_pitch: Optional[float] = None,
+        avg_yaw: Optional[float] = None,
+        total_frames: Optional[int] = None,
     ) -> List[str]:
         """
-        Produce a list of human-readable insight strings.
-
-        These insights can be passed to an LLM prompt like:
-
-            "Based on the following observations, write a coaching summary: ..."
+        Produce a list of human-readable insight strings followed by a
+        rich LLM coaching prompt as the final element.
         """
         insights: List[str] = []
 
@@ -91,7 +93,7 @@ class PromptMapper:
             elif blink_rate < 6:
                 insights.append(
                     f"Low blink rate ({blink_rate:.1f} blinks/min) — the user "
-                    f"may be hyper-focused."
+                    f"may be hyper-focused or experiencing screen-induced dryness."
                 )
             else:
                 insights.append(
@@ -131,54 +133,199 @@ class PromptMapper:
                 f"({(1 - looking_away_ratio) * 100:.1f}% of frames)."
             )
 
-        # --- Overall behavioural prompt (LLM-ready) ---
+        # --- LLM coaching prompt (always last element) ---
         insights.append(self._build_llm_prompt(
             avg_ear=avg_ear,
+            min_ear=min_ear,
             blink_count=blink_count,
             blink_rate=blink_rate,
+            avg_mar=avg_mar,
             yawn_count=yawn_count,
+            looking_away_count=looking_away_count,
             looking_away_ratio=looking_away_ratio,
             engagement_score=engagement_score,
+            duration_seconds=duration_seconds,
+            avg_pitch=avg_pitch,
+            avg_yaw=avg_yaw,
+            total_frames=total_frames,
         ))
 
         return insights
 
+    def _classify_ear(self, ear: float) -> str:
+        if ear >= 0.30:
+            return "normal (eyes fully open)"
+        elif ear >= 0.22:
+            return "slightly low (mild fatigue possible)"
+        elif ear >= 0.15:
+            return "low (significant drowsiness risk)"
+        else:
+            return "very low (severe eye closure detected)"
+
+    def _classify_blink_rate(self, rate: float) -> str:
+        if rate > 30:
+            return "elevated — possible eye strain or irritation"
+        elif rate > 20:
+            return "slightly high — mild fatigue"
+        elif rate >= 12:
+            return "normal range"
+        elif rate >= 6:
+            return "slightly low — screen-focused state"
+        else:
+            return "very low — possible hyper-focus or dry eyes risk"
+
+    def _classify_engagement(self, score: float) -> str:
+        if score >= 85:
+            return "excellent"
+        elif score >= 70:
+            return "good"
+        elif score >= 50:
+            return "moderate — improvement possible"
+        else:
+            return "poor — significant distraction present"
+
     def _build_llm_prompt(
         self,
         avg_ear: Optional[float] = None,
+        min_ear: Optional[float] = None,
         blink_count: int = 0,
         blink_rate: Optional[float] = None,
+        avg_mar: Optional[float] = None,
         yawn_count: int = 0,
+        looking_away_count: int = 0,
         looking_away_ratio: float = 0.0,
         engagement_score: Optional[float] = None,
+        duration_seconds: Optional[float] = None,
+        avg_pitch: Optional[float] = None,
+        avg_yaw: Optional[float] = None,
+        total_frames: Optional[int] = None,
     ) -> str:
         """
-        Build a structured prompt that can be sent to an LLM for a coaching
-        summary.
+        Build a rich, structured prompt for an LLM coaching summary.
+
+        The prompt provides:
+          - Role and output format instructions
+          - Interpreted (not just raw) telemetry with context labels
+          - Clear section structure for the LLM to follow
+          - Specific coaching constraints (tone, length, actionability)
         """
-        lines = [
-            "=== LLM BEHAVIOURAL COACHING PROMPT ===",
-            "You are an expert behavioural coach. Based on the following "
-            "real-time facial telemetry, write a concise coaching summary "
-            "(2-3 paragraphs) for the user. Be constructive and specific.",
-            "",
-            "Telemetry Data:",
-        ]
+
+        # --- Session context block ---
+        session_lines = ["SESSION CONTEXT:"]
+        if duration_seconds is not None:
+            mins = int(duration_seconds // 60)
+            secs = int(duration_seconds % 60)
+            duration_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            session_lines.append(f"  - Session duration : {duration_str}")
+        if total_frames is not None:
+            session_lines.append(f"  - Frames analysed  : {total_frames}")
+
+        # --- Eye & attention block ---
+        eye_lines = ["EYE & ATTENTION METRICS:"]
         if avg_ear is not None:
-            lines.append(f"- Eye Aspect Ratio (EAR): {avg_ear:.3f}")
-        lines.append(f"- Blinks detected: {blink_count}")
+            eye_lines.append(
+                f"  - Avg Eye Aspect Ratio (EAR) : {avg_ear:.3f}  "
+                f"→ {self._classify_ear(avg_ear)}"
+            )
+        if min_ear is not None:
+            eye_lines.append(
+                f"  - Min EAR (lowest blink)     : {min_ear:.3f}  "
+                f"({'within normal range' if min_ear >= 0.15 else 'significant closure detected'})"
+            )
         if blink_rate is not None:
-            lines.append(f"- Blink rate: {blink_rate:.1f} blinks/min")
-        lines.append(f"- Yawns detected: {yawn_count}")
-        lines.append(
-            f"- Looking-away ratio: {looking_away_ratio * 100:.1f}%"
+            eye_lines.append(
+                f"  - Blink rate                 : {blink_rate:.1f} blinks/min  "
+                f"→ {self._classify_blink_rate(blink_rate)}"
+            )
+        eye_lines.append(f"  - Total blinks               : {blink_count}")
+
+        # --- Fatigue signals block ---
+        fatigue_lines = ["FATIGUE & ALERTNESS SIGNALS:"]
+        if avg_mar is not None:
+            mar_label = (
+                "elevated — possible yawning or talking" if avg_mar > 0.5
+                else "normal — mouth generally closed"
+            )
+            fatigue_lines.append(
+                f"  - Avg Mouth Aspect Ratio (MAR): {avg_mar:.3f}  → {mar_label}"
+            )
+        fatigue_lines.append(
+            f"  - Yawns detected              : {yawn_count}  "
+            f"{'(fatigue signal present)' if yawn_count > 0 else '(none — good alertness)'}"
         )
+
+        # --- Head pose & distraction block ---
+        pose_lines = ["HEAD POSE & DISTRACTION:"]
+        if avg_pitch is not None:
+            pitch_label = (
+                "forward lean / nodding" if avg_pitch < -10
+                else "upright / alert" if abs(avg_pitch) <= 10
+                else "head tilted back"
+            )
+            pose_lines.append(
+                f"  - Avg Pitch                  : {avg_pitch:.1f}°  → {pitch_label}"
+            )
+        if avg_yaw is not None:
+            yaw_label = (
+                "facing left" if avg_yaw < -10
+                else "centred / forward" if abs(avg_yaw) <= 10
+                else "facing right"
+            )
+            pose_lines.append(
+                f"  - Avg Yaw                    : {avg_yaw:.1f}°  → {yaw_label}"
+            )
+        pose_lines.append(
+            f"  - Looking-away events         : {looking_away_count}"
+        )
+        pose_lines.append(
+            f"  - % of time distracted        : {looking_away_ratio * 100:.1f}%  "
+            f"→ {'concerning' if looking_away_ratio > 0.2 else 'acceptable'}"
+        )
+
+        # --- Engagement summary block ---
+        engagement_lines = ["ENGAGEMENT SUMMARY:"]
         if engagement_score is not None:
-            lines.append(f"- Engagement score: {engagement_score:.0f}%")
-        lines.append("")
+            engagement_lines.append(
+                f"  - Composite engagement score : {engagement_score:.1f}%  "
+                f"→ {self._classify_engagement(engagement_score)}"
+            )
+
+        # --- Assemble full prompt ---
+        lines = [
+            "╔══════════════════════════════════════════╗",
+            "║      LLM BEHAVIOURAL COACHING PROMPT     ║",
+            "╚══════════════════════════════════════════╝",
+            "",
+            "ROLE:",
+            "You are an expert behavioural and cognitive performance coach "
+            "specialising in screen-based work sessions. You interpret facial "
+            "engagement telemetry and provide constructive, evidence-based feedback.",
+            "",
+            "OUTPUT FORMAT:",
+            "Write exactly 3 paragraphs:",
+            "  1. PERFORMANCE SUMMARY  — What the metrics collectively say about "
+            "this session. Mention the engagement score and key signals. Avoid "
+            "simply repeating numbers; interpret what they mean behaviourally.",
+            "  2. KEY OBSERVATIONS     — Highlight the 2-3 most significant "
+            "findings (positive or negative). Be specific: name the metric and "
+            "explain its real-world implication for the user.",
+            "  3. ACTIONABLE COACHING  — Give 2-3 specific, practical "
+            "recommendations the user can act on before their next session. "
+            "Tie each recommendation directly to an observed metric.",
+            "",
+            "TONE: Encouraging but honest. Do not sugarcoat poor metrics. "
+            "Do not be clinical or robotic. Write as if speaking to the user directly.",
+            "",
+        ]
+
+        lines += session_lines + [""]
+        lines += eye_lines + [""]
+        lines += fatigue_lines + [""]
+        lines += pose_lines + [""]
+        lines += engagement_lines + [""]
+
         lines.append(
-            "Please provide actionable recommendations to improve engagement "
-            "and reduce fatigue."
+            "Now write the 3-paragraph coaching summary following the OUTPUT FORMAT above."
         )
 
         return "\n".join(lines)

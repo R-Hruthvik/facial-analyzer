@@ -30,9 +30,9 @@ class LogEntry:
     traceback: Optional[str] = None
 
 
-class StreamlitLogHandler(logging.Handler):
+class DashboardLogHandler(logging.Handler):
     """
-    Custom logging handler that stores log entries and can display them in Streamlit.
+    Custom logging handler that stores log entries and supports active listeners (e.g., for WebSockets).
     """
     
     def __init__(self, max_entries: int = 1000):
@@ -44,15 +44,29 @@ class StreamlitLogHandler(logging.Handler):
             '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
             datefmt='%H:%M:%S'
         )
+        self.listeners = []
+    
+    def add_listener(self, callback) -> None:
+        """Register a callback listener that receives new LogEntry objects."""
+        with self._lock:
+            if callback not in self.listeners:
+                self.listeners.append(callback)
+                
+    def remove_listener(self, callback) -> None:
+        """Unregister a callback listener."""
+        with self._lock:
+            if callback in self.listeners:
+                self.listeners.remove(callback)
     
     def emit(self, record: logging.LogRecord) -> None:
-        """Add a log entry to the internal buffer."""
+        """Add a log entry to the internal buffer and notify listeners."""
         try:
             import traceback as tb
             exc_text = None
             if record.exc_info:
                 exc_text = "".join(tb.format_exception(*record.exc_info))
 
+            entry = None
             with self._lock:
                 # Create log entry
                 entry = LogEntry(
@@ -77,6 +91,14 @@ class StreamlitLogHandler(logging.Handler):
                     
                 # Trigger periodic cleanup
                 self.periodic_cleanup()
+                
+            # Notify listeners outside the lock to prevent deadlock
+            if entry is not None:
+                for listener in self.listeners:
+                    try:
+                        listener(entry)
+                    except Exception:
+                        pass
                     
         except Exception:
             # Don't let logging errors break the application
@@ -121,11 +143,11 @@ class StreamlitLogHandler(logging.Handler):
 
 class LogManager:
     """
-    Manages logging for the dashboard with Streamlit integration.
+    Manages logging for the dashboard.
     """
     
     def __init__(self):
-        self._handler = StreamlitLogHandler()
+        self._handler = DashboardLogHandler()
         self._logger = logging.getLogger("facial-analyzer")
         self._logger.addHandler(self._handler)
         self._logger.setLevel(logging.INFO)
@@ -133,8 +155,8 @@ class LogManager:
         # Prevent duplicate logs
         self._logger.propagate = False
     
-    def get_handler(self) -> StreamlitLogHandler:
-        """Get the log handler for Streamlit integration."""
+    def get_handler(self) -> DashboardLogHandler:
+        """Get the log handler."""
         return self._handler
     
     def get_recent_logs(self, level_filter: str = None, limit: int = 100) -> List[LogEntry]:

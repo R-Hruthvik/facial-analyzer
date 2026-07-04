@@ -12,7 +12,7 @@ environments:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -25,6 +25,7 @@ from src.core.metrics import (
     MouthAspectRatioTracker,
     calculate_ear_both,
     calculate_mar,
+    calculate_gaze_distraction,
 )
 from src.pipeline.engagement_scorer import EngagementScorer
 from src.pipeline.prompt_mapper import PromptMapper
@@ -50,6 +51,11 @@ class FrameResult:
     total_latency_ms: float
     fps: float = 0.0
     frame_skipped: bool = False
+    is_talking: bool = False
+    is_distracted: bool = False
+    distraction_type: str = ""
+    pose_axes_2d: Optional[Dict] = None
+    looking_away_seconds: float = 0.0
 
 
 @dataclass
@@ -93,13 +99,15 @@ class FrameProcessor:
         mar_threshold: float = settings.MAR_THRESHOLD,
         frame_skip: int = settings.FRAME_SKIP,
         resize_scale: float = settings.RESIZE_SCALE,
+        face_mesh_engine=None,
     ) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
         self._frame_skip = frame_skip
         self._resize_scale = resize_scale
 
         # Core engines
-        self._face_mesh = FaceMeshEngine()
+        self._owns_face_mesh = (face_mesh_engine is None)
+        self._face_mesh = face_mesh_engine if face_mesh_engine else FaceMeshEngine()
         self._pose_estimator = HeadPoseEstimator()
         self._engagement_scorer = EngagementScorer()
         self._prompt_mapper = PromptMapper()
@@ -109,11 +117,31 @@ class FrameProcessor:
             threshold=ear_threshold,
             consecutive_frames=settings.EAR_CONSECUTIVE_FRAMES,
         )
-        self._mar_tracker = MouthAspectRatioTracker(threshold=mar_threshold)
+        self._mar_tracker = MouthAspectRatioTracker(threshold_yawn=mar_threshold)
 
         # Accumulated data for summary
         self._results: List[FrameResult] = []
         self._start_time: Optional[float] = None
+        self._last_pose: Optional[Tuple[float, float, float]] = None
+        self._consecutive_looking_away_frames = 0
+
+        # Baseline calibration
+        self._calibrated = False
+        self._calibration_frames = []
+        self._pitch_offset = 0.0
+        self._yaw_offset = 0.0
+        self._roll_offset = 0.0
+
+        # Running counters for fast O(1) stats calculation
+        self._looking_away_frames_total = 0
+        self._processed_frames_total = 0
+        self._looking_away_seconds = 0.0
+        self._last_frame_time = None
+        
+        # Consecutive duration tracking in seconds
+        self._consecutive_looking_away_seconds = 0.0
+        self._consecutive_closed_eyes_seconds = 0.0
+        self._consecutive_no_face_seconds = 0.0
 
         # FPS tracking and performance adaptation
         from collections import deque
@@ -135,18 +163,16 @@ class FrameProcessor:
     ) -> Generator[FrameResult, None, None]:
         """
         Run the processing loop on a live camera feed.
-
-        Parameters
-        ----------
-        camera_id : int — device index for ``cv2.VideoCapture``.
-        on_frame : optional callback invoked with the annotated frame (BGR).
-
-        Yields ``FrameResult`` for each **processed** frame (skipped frames
-        yield a result with ``frame_skipped=True`` and no metrics).
         """
-        cap = cv2.VideoCapture(camera_id)
+        import sys
+        if sys.platform.startswith("win"):
+            cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(camera_id)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.FRAME_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.FRAME_HEIGHT)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Only keep the most recent frame to eliminate lag
+
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open camera {camera_id}")
 
@@ -220,13 +246,17 @@ class FrameProcessor:
         pitches = [r.pitch for r in processed if r.pitch is not None]
         yaws = [r.yaw for r in processed if r.yaw is not None]
         rolls = [r.roll for r in processed if r.roll is not None]
-        away_count = sum(1 for r in processed if r.is_looking_away)
+        
+        away_seconds_int = int(self._looking_away_seconds)
 
         duration = (
             processed[-1].timestamp - processed[0].timestamp
             if self._start_time
             else len(processed) / 30.0
         )
+        
+        away_ratio = self._looking_away_seconds / max(duration, 1.0)
+        
         blink_rate = (
             self._ear_tracker.blink_count / (duration / 60.0)
             if duration > 0
@@ -237,7 +267,7 @@ class FrameProcessor:
             avg_ear=float(np.mean(ears)),
             min_ear=float(np.min(ears)),
             avg_mar=float(np.mean(mars)),
-            looking_away_ratio=away_count / max(len(processed), 1),
+            looking_away_ratio=away_ratio,
             blink_rate=blink_rate,
         )
 
@@ -248,8 +278,8 @@ class FrameProcessor:
             blink_rate=blink_rate,
             avg_mar=float(np.mean(mars)),
             yawn_count=self._mar_tracker.yawn_count,
-            looking_away_count=away_count,
-            looking_away_ratio=away_count / max(len(processed), 1),
+            looking_away_count=away_seconds_int,
+            looking_away_ratio=away_ratio,
             engagement_score=score,
         )
 
@@ -267,11 +297,19 @@ class FrameProcessor:
             avg_pitch=round(float(np.mean(pitches)), 2) if pitches else None,
             avg_yaw=round(float(np.mean(yaws)), 2) if yaws else None,
             avg_roll=round(float(np.mean(rolls)), 2) if rolls else None,
-            looking_away_count=away_count,
-            looking_away_ratio=round(away_count / max(len(processed), 1), 4),
+            looking_away_count=away_seconds_int,
+            looking_away_ratio=round(away_ratio, 4),
             engagement_score=round(score, 1),
             insights=insights,
         )
+
+    def close(self) -> None:
+        """Close resources owned by the processor."""
+        if getattr(self, "_owns_face_mesh", False) and self._face_mesh:
+            try:
+                self._face_mesh.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Internal processing loop
@@ -284,10 +322,7 @@ class FrameProcessor:
         frame_idx = -1
 
         while True:
-            t0 = time.perf_counter()
             ret, frame_bgr = cap.read()
-            t1 = time.perf_counter()
-            self._logger.warning("cap.read() took %.1f ms", (t1 - t0) * 1000)
             if not ret:
                 break
 
@@ -322,6 +357,7 @@ class FrameProcessor:
                     total_latency_ms=0.0,
                     fps=current_fps,
                     frame_skipped=True,
+                    is_talking=self._mar_tracker.is_talking,
                 )
                 continue
 
@@ -356,11 +392,15 @@ class FrameProcessor:
                 roll=None,
                 is_looking_away=False,
                 engagement_score=0.0,
-                blink_count=self._ear_tracker.blink_count,
-                yawn_count=self._mar_tracker.yawn_count,
+                blink_count=self._ear_tracker.blink_count if self._calibrated else 0,
+                yawn_count=self._mar_tracker.yawn_count if self._calibrated else 0,
                 inference_ms=self._face_mesh.avg_inference_ms,
                 total_latency_ms=0.0,
                 fps=current_fps,
+                is_talking=False,
+                is_distracted=False,
+                distraction_type="",
+                looking_away_seconds=self._looking_away_seconds,
             )
 
             landmarks = self._face_mesh.extract_landmarks(results)
@@ -370,22 +410,114 @@ class FrameProcessor:
                 mar = calculate_mar(landmarks)
                 result.left_ear = left_ear
                 result.right_ear = right_ear
-                result.avg_ear = self._ear_tracker.update(avg_ear)
-                result.mar = self._mar_tracker.update(mar)
-                result.blink_count = self._ear_tracker.blink_count
-                result.yawn_count = self._mar_tracker.yawn_count
+                if self._calibrated:
+                    result.avg_ear = self._ear_tracker.update(avg_ear)
+                    result.mar = self._mar_tracker.update(mar)
+                    result.blink_count = self._ear_tracker.blink_count
+                    result.yawn_count = self._mar_tracker.yawn_count
+                    result.is_talking = self._mar_tracker.is_talking
+                else:
+                    result.avg_ear = avg_ear
+                    result.mar = mar
+                    result.blink_count = 0
+                    result.yawn_count = 0
+                    result.is_talking = False
 
                 # --- Head pose ---
                 pose = self._pose_estimator.estimate(landmarks, w, h)
                 if pose:
-                    result.pitch = pose["pitch"]
-                    result.yaw = pose["yaw"]
-                    result.roll = pose["roll"]
-                    result.is_looking_away = (
+                    result.pose_axes_2d = pose.get("pose_axes_2d")
+                    raw_pitch = pose["pitch"]
+                    raw_yaw = pose["yaw"]
+                    raw_roll = pose["roll"]
+
+                    # Perform baseline calibration for first 15 valid frames
+                    if not self._calibrated:
+                        self._calibration_frames.append((raw_pitch, raw_yaw, raw_roll))
+                        if len(self._calibration_frames) >= 15:
+                            import numpy as np
+                            self._pitch_offset = float(np.mean([f[0] for f in self._calibration_frames]))
+                            self._yaw_offset = float(np.mean([f[1] for f in self._calibration_frames]))
+                            self._roll_offset = float(np.mean([f[2] for f in self._calibration_frames]))
+                            self._calibrated = True
+                            # Reset trackers to start from clean 0 state after calibration completes
+                            self._ear_tracker.reset()
+                            self._mar_tracker.reset()
+                            self._logger.info(
+                                f"Webcam head-pose calibration complete: Pitch offset = {self._pitch_offset:.2f}°, "
+                                f"Yaw offset = {self._yaw_offset:.2f}°, Roll offset = {self._roll_offset:.2f}°"
+                            )
+
+                    # Apply calibration offsets
+                    calibrated_pitch = raw_pitch - self._pitch_offset
+                    calibrated_yaw = raw_yaw - self._yaw_offset
+                    calibrated_roll = raw_roll - self._roll_offset
+
+                    # Discard impossible physical rotations (> 50 deg relative to baseline)
+                    if abs(calibrated_pitch) > 50 or abs(calibrated_yaw) > 50 or abs(calibrated_roll) > 50:
+                        if self._last_pose:
+                            result.pitch, result.yaw, result.roll = self._last_pose
+                        else:
+                            result.pitch, result.yaw, result.roll = 0.0, 0.0, 0.0
+                    else:
+                        # EMA Smoothing (30% current, 70% previous)
+                        if self._last_pose:
+                            lp, ly, lr = self._last_pose
+                            result.pitch = 0.3 * calibrated_pitch + 0.7 * lp
+                            result.yaw = 0.3 * calibrated_yaw + 0.7 * ly
+                            result.roll = 0.3 * calibrated_roll + 0.7 * lr
+                        else:
+                            result.pitch = calibrated_pitch
+                            result.yaw = calibrated_yaw
+                            result.roll = calibrated_roll
+
+                        self._last_pose = (result.pitch, result.yaw, result.roll)
+
+                    # Combined Head-Pose and Eye-Gaze Distraction detection
+                    head_looking_away = (
                         abs(result.pitch) > settings.HEAD_PITCH_THRESHOLD
                         or abs(result.yaw) > settings.HEAD_YAW_THRESHOLD
-                        or abs(result.roll) > settings.HEAD_ROLL_THRESHOLD
                     )
+                    eye_looking_away = calculate_gaze_distraction(landmarks)
+                    result.is_looking_away = bool(head_looking_away or eye_looking_away)
+
+                # Update distraction time based on actual seconds between frames
+                current_time = timestamp
+                dt = 0.0
+                if self._last_frame_time is not None:
+                    dt = current_time - self._last_frame_time
+                    if result.is_looking_away:
+                        self._looking_away_seconds += dt
+                self._last_frame_time = current_time
+                result.looking_away_seconds = self._looking_away_seconds
+
+                # Update distraction duration segment counters
+                self._consecutive_no_face_seconds = 0.0
+                if result.is_looking_away:
+                    self._consecutive_looking_away_seconds += dt
+                else:
+                    self._consecutive_looking_away_seconds = 0.0
+
+                if self._calibrated and result.avg_ear < settings.EAR_THRESHOLD:
+                    self._consecutive_closed_eyes_seconds += dt
+                else:
+                    self._consecutive_closed_eyes_seconds = 0.0
+
+                # Distraction Alert evaluation: trigger if looking away or eyes closed for > 2.0s
+                if self._consecutive_closed_eyes_seconds > 2.0:
+                    result.is_distracted = True
+                    result.distraction_type = "drowsy"
+                elif self._consecutive_looking_away_seconds > 2.0:
+                    result.is_distracted = True
+                    result.distraction_type = "distracted"
+                else:
+                    result.is_distracted = False
+                    result.distraction_type = ""
+
+                # Update running counters for O(1) ratio calculation
+                self._processed_frames_total += 1
+                if result.is_looking_away:
+                    self._looking_away_frames_total += 1
 
                 # --- Engagement score ---
                 result.engagement_score = self._engagement_scorer.compute(
@@ -393,8 +525,7 @@ class FrameProcessor:
                     min_ear=self._ear_tracker.avg_ear,
                     avg_mar=result.mar,
                     looking_away_ratio=(
-                        sum(1 for r in self._results if r.is_looking_away)
-                        / max(len(self._results), 1)
+                        self._looking_away_frames_total / self._processed_frames_total
                     ),
                     blink_rate=(
                         self._ear_tracker.blink_count
@@ -404,52 +535,66 @@ class FrameProcessor:
                 )
                 
                 # Log face detection and metrics
+                p_val = result.pitch if result.pitch is not None else 0.0
+                y_val = result.yaw if result.yaw is not None else 0.0
+                r_val = result.roll if result.roll is not None else 0.0
                 self._logger.debug(
-                    "Frame %d: EAR=%.3f, MAR=%.3f, Engagement=%.1f%%, "
-                    "LookingAway=%s, Pitch=%.1f, Yaw=%.1f, Roll=%.1f",
-                    frame_idx,
-                    result.avg_ear,
-                    result.mar,
-                    result.engagement_score,
-                    result.is_looking_away,
-                    result.pitch or 0.0,
-                    result.yaw or 0.0,
-                    result.roll or 0.0,
+                    f"Pose: P={p_val:.1f} Y={y_val:.1f} R={r_val:.1f} | LookingAway={result.is_looking_away}"
                 )
 
                 # --- Draw mesh on frame ---
                 FaceMeshEngine.draw_mesh(frame_bgr, landmarks)
-                self._annotate_frame(frame_bgr, result)
+                # self._annotate_frame(frame_bgr, result)
+            else:
+                # If no face is detected, user is looking away
+                result.is_looking_away = True
+                
+                # Update distraction time based on actual seconds between frames
+                current_time = timestamp
+                dt = 0.0
+                if self._last_frame_time is not None:
+                    dt = current_time - self._last_frame_time
+                    self._looking_away_seconds += dt
+                self._last_frame_time = current_time
+                result.looking_away_seconds = self._looking_away_seconds
+
+                # Reset landmarks-specific timers, accumulate absence timer
+                self._consecutive_looking_away_seconds = 0.0
+                self._consecutive_closed_eyes_seconds = 0.0
+                self._consecutive_no_face_seconds += dt
+
+                # Distraction Alert evaluation: trigger absent alert if face is missing for > 2.0s
+                if self._consecutive_no_face_seconds > 2.0:
+                    result.is_distracted = True
+                    result.distraction_type = "absent"
+                else:
+                    result.is_distracted = False
+                    result.distraction_type = ""
+
+                # Update running counters for O(1) ratio calculation
+                self._processed_frames_total += 1
+                if result.is_looking_away:
+                    self._looking_away_frames_total += 1
+
+                result.engagement_score = self._engagement_scorer.compute(
+                    avg_ear=0.0,
+                    min_ear=self._ear_tracker.avg_ear,
+                    avg_mar=0.0,
+                    looking_away_ratio=(
+                        self._looking_away_frames_total / self._processed_frames_total
+                    ),
+                    blink_rate=(
+                        self._ear_tracker.blink_count
+                        / max((timestamp - (self._start_time or timestamp)), 1)
+                        * 60.0
+                    ),
+                )
 
             loop_elapsed = (time.perf_counter() - loop_start) * 1000.0
             result.total_latency_ms = round(loop_elapsed, 2)
 
-            # Performance adaptation (CPU protection)
-            if current_fps < 12.0:
-                self._low_fps_counter += 1
-                if self._low_fps_counter >= 60:  # ~2-5 seconds of sustained low FPS
-                    adapted = False
-                    if self._resize_scale > 0.5:
-                        self._resize_scale = max(0.5, self._resize_scale - 0.15)
-                        adapted = True
-                    elif self._frame_skip < 3:
-                        self._frame_skip += 1
-                        adapted = True
-                    if adapted:
-                        self._logger.warning(
-                            "Sustained low FPS (%.1f) detected. Adapting pipeline: "
-                            "resize_scale=%.2f, frame_skip=%d to reduce CPU load.",
-                            current_fps, self._resize_scale, self._frame_skip
-                        )
-                    self._low_fps_counter = 0
-            else:
-                self._low_fps_counter = max(0, self._low_fps_counter - 1)
-
-            # Cap maximum frame rate at 30 FPS to prevent 100% CPU usage
-            elapsed_sec = loop_elapsed / 1000.0
-            target_period = 1.0 / 30.0
-            if elapsed_sec < target_period:
-                time.sleep(target_period - elapsed_sec)
+            # Let cv2.VideoCapture natural hardware blocking regulate the framerate.
+            # Artificial sleeps cause the camera buffer to fill up, resulting in massive lag.
 
             self._results.append(result)
             yield result

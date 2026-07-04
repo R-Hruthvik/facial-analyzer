@@ -51,6 +51,8 @@ class PerFrameMetrics(BaseModel):
     yaw: Optional[float] = None
     roll: Optional[float] = None
     is_looking_away: bool = False
+    is_distracted: bool = False
+    distraction_type: Optional[str] = ""
     inference_ms: Optional[float] = None
 
 

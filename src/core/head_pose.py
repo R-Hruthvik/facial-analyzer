@@ -25,11 +25,11 @@ from src.core.face_mesh_engine import HEAD_POSE_LANDMARKS
 _3D_REF_POINTS = np.array(
     [
         [0.0, 0.0, 0.0],        # 1   — Nose tip
-        [-0.225, -0.17, -0.12],  # 33  — Left eye outer corner
-        [0.225, -0.17, -0.12],   # 263 — Right eye outer corner
-        [-0.15, 0.08, -0.05],    # 61  — Left mouth corner
-        [0.15, 0.08, -0.05],     # 291 — Right mouth corner
-        [0.0, 0.23, -0.10],      # 199 — Chin
+        [0.0, -0.08, -0.06],    # 4   — Nose bridge
+        [-0.225, -0.17, -0.12], # 33  — Left eye outer corner
+        [0.225, -0.17, -0.12],  # 263 — Right eye outer corner
+        [-0.08, -0.17, -0.09],  # 133 — Left eye inner corner
+        [0.08, -0.17, -0.09],   # 362 — Right eye inner corner
     ],
     dtype=np.float64,
 )
@@ -98,31 +98,56 @@ class HeadPoseEstimator:
         angles = self._rotation_matrix_to_euler(rmat)
 
         pitch, yaw, roll = float(angles[0]), float(angles[1]), float(angles[2])
-        
+
         # Adjust roll if it's centered around 180 (due to canonical model orientation)
         if roll > 90:
             roll -= 180
         elif roll < -90:
             roll += 180
-            
+
         # Adjust pitch if it's centered around 180
         if pitch > 90:
             pitch -= 180
         elif pitch < -90:
             pitch += 180
-            
+
         # Adjust yaw if it's centered around 180
         if yaw > 90:
             yaw -= 180
         elif yaw < -90:
             yaw += 180
 
-        print(f"DEBUG: Head pose - Pitch: {pitch:.1f}, Yaw: {yaw:.1f}, Roll: {roll:.1f}")
+        logger.debug(f"Head pose - Pitch: {pitch:.1f}, Yaw: {yaw:.1f}, Roll: {roll:.1f}")
+
+        # Project 3D axes (Origin, X, Y, Z) to 2D image coordinates for client canvas drawing
+        axis_len = 0.15
+        axis_points = np.array([
+            [0.0, 0.0, 0.0],          # Origin (nose tip)
+            [axis_len, 0.0, 0.0],     # X axis (Pitch / Red)
+            [0.0, axis_len, 0.0],     # Y axis (Yaw / Green)
+            [0.0, 0.0, axis_len],     # Z axis (Roll / Blue)
+        ], dtype=np.float64)
+
+        imgpts, _ = cv2.projectPoints(
+            axis_points,
+            rvec,
+            tvec,
+            self._camera_matrix,
+            self._dist_coeffs
+        )
+        imgpts = imgpts.reshape(-1, 2)
+        pose_axes_2d = {
+            "origin": [float(imgpts[0][0]), float(imgpts[0][1])],
+            "x_axis": [float(imgpts[1][0]), float(imgpts[1][1])],
+            "y_axis": [float(imgpts[2][0]), float(imgpts[2][1])],
+            "z_axis": [float(imgpts[3][0]), float(imgpts[3][1])],
+        }
 
         return {
             "pitch": pitch,
             "yaw": yaw,
             "roll": roll,
+            "pose_axes_2d": pose_axes_2d,
         }
 
     # ------------------------------------------------------------------

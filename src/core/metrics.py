@@ -88,19 +88,10 @@ def calculate_ear_both(landmarks: np.ndarray) -> Tuple[float, float, float]:
 
 def calculate_mar(landmarks: np.ndarray) -> float:
     """
-    Compute the Mouth Aspect Ratio.
-
-    MAR = (|p2-p8| + |p3-p7| + |p4-p6|) / (2 * |p1-p5|)
-
-    Uses the outer-lip eight-point set defined in MOUTH_MAR.
+    Compute the Mouth Aspect Ratio based on inner mouth vertical opening
+    normalized by mouth width to capture clean talking and yawning dynamics.
     """
-    pts = landmarks[MOUTH_MAR, :2]
-    d1 = np.linalg.norm(pts[1] - pts[7])
-    d2 = np.linalg.norm(pts[2] - pts[6])
-    d3 = np.linalg.norm(pts[3] - pts[5])
-    d4 = np.linalg.norm(pts[0] - pts[4])
-    mar = (d1 + d2 + d3) / (2.0 * d4 + 1e-6)
-    return float(mar)
+    return calculate_mouth_opening_ratio(landmarks)
 
 
 def calculate_mouth_opening_ratio(landmarks: np.ndarray) -> float:
@@ -136,12 +127,14 @@ class EyeAspectRatioTracker:
         self,
         threshold: float = settings.EAR_THRESHOLD,
         consecutive_frames: int = settings.EAR_CONSECUTIVE_FRAMES,
-        window_size: int = 30,
+        window_size: int = 5,
     ) -> None:
         self.threshold = threshold
         self.consecutive_frames = consecutive_frames
         self._history = deque(maxlen=window_size)
         self._below_counter = 0
+        self._above_counter = 0
+        self._blink_in_progress = False
         self._blink_count = 0
         self._logger = logging.getLogger(self.__class__.__name__)
 
@@ -154,25 +147,33 @@ class EyeAspectRatioTracker:
         return float(np.mean(self._history)) if self._history else 0.0
 
     def update(self, ear: float) -> float:
-        """
-        Feed a new EAR value. Returns the **smoothed** (averaged) EAR.
-        """
+        """Feed a new EAR value. Returns the smoothed EAR."""
         self._history.append(ear)
         smoothed = float(np.mean(self._history))
 
-        if smoothed < self.threshold:
+        # Check raw EAR against threshold
+        if ear < self.threshold:
             self._below_counter += 1
-        else:
-            if self._below_counter >= self.consecutive_frames:
+            self._above_counter = 0
+            # Only count blink if we had enough consecutive frames below threshold
+            if self._below_counter >= self.consecutive_frames and not self._blink_in_progress:
                 self._blink_count += 1
-                self._logger.debug("Blink detected (EAR=%.3f)", smoothed)
-            self._below_counter = 0
+                self._blink_in_progress = True
+                self._logger.debug("Blink detected (EAR=%.3f, frames=%d)", ear, self._below_counter)
+        else:
+            self._above_counter += 1
+            # Reset counter and blink state when eye opens for at least 2 frames
+            if self._above_counter >= 2:
+                self._blink_in_progress = False
+                self._below_counter = 0
 
         return smoothed
 
     def reset(self) -> None:
         self._history.clear()
         self._below_counter = 0
+        self._above_counter = 0
+        self._blink_in_progress = False
         self._blink_count = 0
 
 
@@ -182,17 +183,32 @@ class MouthAspectRatioTracker:
     """
 
     def __init__(
-        self, threshold: float = settings.MAR_THRESHOLD, window_size: int = 15
+        self, threshold_yawn: float = settings.MAR_THRESHOLD, threshold_talk: float = 0.35, window_size: int = 5
     ) -> None:
-        self.threshold = threshold
+        self.threshold_yawn = threshold_yawn
+        self.threshold_talk = threshold_talk
         self._history = deque(maxlen=window_size)
-        self._open_duration_frames = 0
+        
+        self._yawn_frames = 0
+        self._talk_frames = 0
         self._yawn_count = 0
+        self._talk_count = 0
+        
+        self._yawn_in_progress = False
+        self._talk_in_progress = False
         self._logger = logging.getLogger(self.__class__.__name__)
 
     @property
     def yawn_count(self) -> int:
         return self._yawn_count
+
+    @property
+    def talk_count(self) -> int:
+        return self._talk_count
+
+    @property
+    def is_talking(self) -> bool:
+        return self._talk_in_progress
 
     @property
     def avg_mar(self) -> float:
@@ -202,18 +218,68 @@ class MouthAspectRatioTracker:
         self._history.append(mar)
         smoothed = float(np.mean(self._history))
 
-        if smoothed > self.threshold:
-            self._open_duration_frames += 1
-            # Count a yawn if mouth stays open for >10 consecutive frames
-            if self._open_duration_frames == 12:
+        # Yawn logic
+        if mar >= self.threshold_yawn:
+            self._yawn_frames += 1
+            if self._yawn_frames >= 15 and not self._yawn_in_progress:
                 self._yawn_count += 1
-                self._logger.debug("Yawn detected (MAR=%.3f)", smoothed)
+                self._yawn_in_progress = True
+                self._logger.debug("Yawn detected (MAR=%.3f)", mar)
         else:
-            self._open_duration_frames = 0
+            self._yawn_frames = 0
+            if mar < self.threshold_talk:  # Fully closed mouth resets yawn cooldown
+                self._yawn_in_progress = False
+
+        # Talking logic
+        if self.threshold_talk <= mar < self.threshold_yawn:
+            self._talk_frames += 1
+            if self._talk_frames >= 1 and not self._talk_in_progress:
+                self._talk_count += 1
+                self._talk_in_progress = True
+        else:
+            self._talk_frames = 0
+            if mar < self.threshold_talk:
+                self._talk_in_progress = False
 
         return smoothed
 
     def reset(self) -> None:
         self._history.clear()
-        self._open_duration_frames = 0
+        self._yawn_frames = 0
+        self._talk_frames = 0
         self._yawn_count = 0
+        self._talk_count = 0
+        self._yawn_in_progress = False
+        self._talk_in_progress = False
+
+
+def calculate_gaze_distraction(landmarks: np.ndarray) -> bool:
+    """
+    Determine if user is looking away based on horizontal or vertical iris offset.
+    """
+    if len(landmarks) < 478:
+        return False
+        
+    # Left eye gaze (outer: 33, inner: 133, iris: 468, top: 159, bottom: 145)
+    left_center_x = (landmarks[33, 0] + landmarks[133, 0]) / 2.0
+    left_width = abs(landmarks[33, 0] - landmarks[133, 0]) + 1e-6
+    left_offset_x = (landmarks[468, 0] - left_center_x) / left_width
+    
+    left_center_y = (landmarks[159, 1] + landmarks[145, 1]) / 2.0
+    left_height = abs(landmarks[159, 1] - landmarks[145, 1]) + 1e-6
+    left_offset_y = (landmarks[468, 1] - left_center_y) / left_height
+    
+    # Right eye gaze (outer: 263, inner: 362, iris: 473, top: 386, bottom: 374)
+    right_center_x = (landmarks[263, 0] + landmarks[362, 0]) / 2.0
+    right_width = abs(landmarks[263, 0] - landmarks[362, 0]) + 1e-6
+    right_offset_x = (landmarks[473, 0] - right_center_x) / right_width
+    
+    right_center_y = (landmarks[386, 1] + landmarks[374, 1]) / 2.0
+    right_height = abs(landmarks[386, 1] - landmarks[374, 1]) + 1e-6
+    right_offset_y = (landmarks[473, 1] - right_center_y) / right_height
+    
+    avg_offset_x = (abs(left_offset_x) + abs(right_offset_x)) / 2.0
+    avg_offset_y = (abs(left_offset_y) + abs(right_offset_y)) / 2.0
+    
+    # Gaze thresholds: horizontal displacement > 0.18 or vertical displacement > 0.28
+    return avg_offset_x > 0.18 or avg_offset_y > 0.28

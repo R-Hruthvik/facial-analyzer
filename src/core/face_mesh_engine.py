@@ -48,11 +48,11 @@ FACEMESH_RIGHT_EYE_INDICES = [
 # First 468 landmarks are identical between the old 468-point and new 478-point models.
 HEAD_POSE_LANDMARKS = [
     1,     # nose tip
+    4,     # nose bridge
     33,    # left eye outer corner
     263,   # right eye outer corner
-    61,    # left mouth corner
-    291,   # right mouth corner
-    199,   # chin
+    133,   # left eye inner corner
+    362,   # right eye inner corner
 ]
 
 # Number of landmarks in the new model
