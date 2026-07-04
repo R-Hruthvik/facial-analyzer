@@ -10,6 +10,7 @@ References
 """
 
 import logging
+import math
 from collections import deque
 from typing import List, Optional, Tuple
 
@@ -36,11 +37,8 @@ MOUTH_OUTER = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 3
 MOUTH_MAR = [61, 39, 0, 267, 269, 291, 375, 321]   # simplified 6-point set
 
 # ---------------------------------------------------------------------------
-# Euclidean distance
+# Euclidean distance (inlined via math.sqrt for perf)
 # ---------------------------------------------------------------------------
-
-def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
-    return float(np.linalg.norm(p1[:2] - p2[:2]))   # ignore z
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +61,12 @@ def calculate_ear(landmarks: np.ndarray, eye_indices: List[int]) -> float:
     float — the EAR value.
     """
     pts = landmarks[eye_indices, :2]      # (6, 2)
-    d1 = np.linalg.norm(pts[1] - pts[5])
-    d2 = np.linalg.norm(pts[2] - pts[4])
-    d3 = np.linalg.norm(pts[0] - pts[3])
+    dx, dy = pts[1][0] - pts[5][0], pts[1][1] - pts[5][1]
+    d1 = math.sqrt(dx * dx + dy * dy)
+    dx, dy = pts[2][0] - pts[4][0], pts[2][1] - pts[4][1]
+    d2 = math.sqrt(dx * dx + dy * dy)
+    dx, dy = pts[0][0] - pts[3][0], pts[0][1] - pts[3][1]
+    d3 = math.sqrt(dx * dx + dy * dy)
     ear = (d1 + d2) / (2.0 * d3 + 1e-6)
     return float(ear)
 
@@ -106,8 +107,10 @@ def calculate_mouth_opening_ratio(landmarks: np.ndarray) -> float:
     left = landmarks[61, :2]
     right = landmarks[291, :2]
 
-    height = np.linalg.norm(upper - lower)
-    width = np.linalg.norm(left - right)
+    dx, dy = upper[0] - lower[0], upper[1] - lower[1]
+    height = math.sqrt(dx * dx + dy * dy)
+    dx, dy = left[0] - right[0], left[1] - right[1]
+    width = math.sqrt(dx * dx + dy * dy)
     return float(height / (width + 1e-6))
 
 

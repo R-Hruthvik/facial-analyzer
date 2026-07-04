@@ -13,6 +13,7 @@ Optimisations for CPU-constrained environments:
 import os
 import time
 import logging
+from collections import deque
 from typing import Optional, Tuple
 
 import cv2
@@ -117,7 +118,7 @@ class FaceMeshEngine:
 
         # Performance bookkeeping
         self._frame_count: int = 0
-        self._inference_times: list[float] = []
+        self._inference_times: deque[float] = deque(maxlen=100)
         self._avg_inference_ms: float = 0.0
 
         self._logger.info(
@@ -148,9 +149,6 @@ class FaceMeshEngine:
         self._frame_count += 1
         self._inference_times.append(elapsed_ms)
 
-        # Keep rolling window of ~100 samples for stats
-        if len(self._inference_times) > 100:
-            self._inference_times.pop(0)
         self._avg_inference_ms = np.mean(self._inference_times).item()
 
         return result

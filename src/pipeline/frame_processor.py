@@ -10,6 +10,7 @@ environments:
 """
 
 import logging
+from collections import deque
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Generator, List, Optional, Tuple
@@ -120,7 +121,18 @@ class FrameProcessor:
         self._mar_tracker = MouthAspectRatioTracker(threshold_yawn=mar_threshold)
 
         # Accumulated data for summary
-        self._results: List[FrameResult] = []
+        self._results = deque(maxlen=30)
+
+        # Running accumulators for O(1) summarise()
+        self._sum_ear = 0.0
+        self._sum_mar = 0.0
+        self._min_ear = float('inf')
+        self._sum_pitch = 0.0
+        self._sum_yaw = 0.0
+        self._sum_roll = 0.0
+        self._count_pitch = 0
+        self._count_ear = 0
+        self._count_mar = 0
         self._start_time: Optional[float] = None
         self._last_pose: Optional[Tuple[float, float, float]] = None
         self._consecutive_looking_away_frames = 0
@@ -144,7 +156,6 @@ class FrameProcessor:
         self._consecutive_no_face_seconds = 0.0
 
         # FPS tracking and performance adaptation
-        from collections import deque
         self._fps_timestamps = deque(maxlen=30)
         self._low_fps_counter = 0
 
@@ -200,7 +211,11 @@ class FrameProcessor:
 
     def summarise(self) -> SessionSummary:
         """Aggregate all processed results into a ``SessionSummary``."""
-        if not self._results:
+        n_ear = self._count_ear
+        n_mar = self._count_mar
+        n_pitch = self._count_pitch
+
+        if n_ear == 0:
             return SessionSummary(
                 total_frames=0,
                 processed_frames=0,
@@ -220,43 +235,19 @@ class FrameProcessor:
                 engagement_score=0.0,
             )
 
-        processed = [r for r in self._results if not r.frame_skipped]
-        if not processed:
-            return SessionSummary(
-                total_frames=len(self._results),
-                processed_frames=0,
-                avg_inference_ms=0.0,
-                duration_seconds=0.0,
-                avg_ear=0.0,
-                min_ear=0.0,
-                blink_count=0,
-                blink_rate_per_min=0.0,
-                avg_mar=0.0,
-                yawn_count=0,
-                avg_pitch=None,
-                avg_yaw=None,
-                avg_roll=None,
-                looking_away_count=0,
-                looking_away_ratio=0.0,
-                engagement_score=0.0,
-            )
+        avg_ear = self._sum_ear / n_ear
+        min_ear = self._min_ear if self._min_ear != float('inf') else 0.0
+        avg_mar = self._sum_mar / n_mar if n_mar else 0.0
+        avg_pitch = self._sum_pitch / n_pitch if n_pitch else None
+        avg_yaw = self._sum_yaw / n_pitch if n_pitch else None
+        avg_roll = self._sum_roll / n_pitch if n_pitch else None
 
-        ears = [r.avg_ear for r in processed]
-        mars = [r.mar for r in processed]
-        pitches = [r.pitch for r in processed if r.pitch is not None]
-        yaws = [r.yaw for r in processed if r.yaw is not None]
-        rolls = [r.roll for r in processed if r.roll is not None]
-        
         away_seconds_int = int(self._looking_away_seconds)
 
-        duration = (
-            processed[-1].timestamp - processed[0].timestamp
-            if self._start_time
-            else len(processed) / 30.0
-        )
-        
+        duration = time.time() - self._start_time if self._start_time else n_ear / 30.0
+
         away_ratio = self._looking_away_seconds / max(duration, 1.0)
-        
+
         blink_rate = (
             self._ear_tracker.blink_count / (duration / 60.0)
             if duration > 0
@@ -264,19 +255,19 @@ class FrameProcessor:
         )
 
         score = self._engagement_scorer.compute(
-            avg_ear=float(np.mean(ears)),
-            min_ear=float(np.min(ears)),
-            avg_mar=float(np.mean(mars)),
+            avg_ear=avg_ear,
+            min_ear=min_ear,
+            avg_mar=avg_mar,
             looking_away_ratio=away_ratio,
             blink_rate=blink_rate,
         )
 
         insights = self._prompt_mapper.generate_insights(
-            avg_ear=float(np.mean(ears)),
-            min_ear=float(np.min(ears)),
+            avg_ear=avg_ear,
+            min_ear=min_ear,
             blink_count=self._ear_tracker.blink_count,
             blink_rate=blink_rate,
-            avg_mar=float(np.mean(mars)),
+            avg_mar=avg_mar,
             yawn_count=self._mar_tracker.yawn_count,
             looking_away_count=away_seconds_int,
             looking_away_ratio=away_ratio,
@@ -285,18 +276,18 @@ class FrameProcessor:
 
         return SessionSummary(
             total_frames=len(self._results),
-            processed_frames=len(processed),
+            processed_frames=n_ear,
             avg_inference_ms=self._face_mesh.avg_inference_ms,
             duration_seconds=round(duration, 1),
-            avg_ear=round(float(np.mean(ears)), 4),
-            min_ear=round(float(np.min(ears)), 4),
+            avg_ear=round(avg_ear, 4),
+            min_ear=round(min_ear, 4),
             blink_count=self._ear_tracker.blink_count,
             blink_rate_per_min=round(blink_rate, 2),
-            avg_mar=round(float(np.mean(mars)), 4),
+            avg_mar=round(avg_mar, 4),
             yawn_count=self._mar_tracker.yawn_count,
-            avg_pitch=round(float(np.mean(pitches)), 2) if pitches else None,
-            avg_yaw=round(float(np.mean(yaws)), 2) if yaws else None,
-            avg_roll=round(float(np.mean(rolls)), 2) if rolls else None,
+            avg_pitch=round(avg_pitch, 2) if avg_pitch is not None else None,
+            avg_yaw=round(avg_yaw, 2) if avg_yaw is not None else None,
+            avg_roll=round(avg_roll, 2) if avg_roll is not None else None,
             looking_away_count=away_seconds_int,
             looking_away_ratio=round(away_ratio, 4),
             engagement_score=round(score, 1),
@@ -370,8 +361,9 @@ class FrameProcessor:
                     int(w * self._resize_scale),
                     int(h * self._resize_scale),
                 )
+                interp = cv2.INTER_AREA if self._resize_scale <= 0.75 else cv2.INTER_LINEAR
                 frame_bgr = cv2.resize(
-                    frame_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+                    frame_bgr, (new_w, new_h), interpolation=interp
                 )
 
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -416,6 +408,13 @@ class FrameProcessor:
                     result.blink_count = self._ear_tracker.blink_count
                     result.yawn_count = self._mar_tracker.yawn_count
                     result.is_talking = self._mar_tracker.is_talking
+                    # Update running accumulators
+                    self._sum_ear += result.avg_ear
+                    self._count_ear += 1
+                    self._sum_mar += result.mar
+                    self._count_mar += 1
+                    if result.avg_ear < self._min_ear:
+                        self._min_ear = result.avg_ear
                 else:
                     result.avg_ear = avg_ear
                     result.mar = mar
@@ -472,6 +471,11 @@ class FrameProcessor:
                             result.roll = calibrated_roll
 
                         self._last_pose = (result.pitch, result.yaw, result.roll)
+                        # Update pose accumulators
+                        self._sum_pitch += result.pitch
+                        self._sum_yaw += result.yaw
+                        self._sum_roll += result.roll
+                        self._count_pitch += 1
 
                     # Combined Head-Pose and Eye-Gaze Distraction detection
                     head_looking_away = (
@@ -539,7 +543,8 @@ class FrameProcessor:
                 y_val = result.yaw if result.yaw is not None else 0.0
                 r_val = result.roll if result.roll is not None else 0.0
                 self._logger.debug(
-                    f"Pose: P={p_val:.1f} Y={y_val:.1f} R={r_val:.1f} | LookingAway={result.is_looking_away}"
+                    "Pose: P=%.1f Y=%.1f R=%.1f | LookingAway=%s",
+                    p_val, y_val, r_val, result.is_looking_away
                 )
 
                 # --- Draw mesh on frame ---

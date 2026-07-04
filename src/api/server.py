@@ -70,6 +70,21 @@ _shared_face_engine = None
 _scorer = EngagementScorer()
 _mapper = PromptMapper()
 
+from src.core.head_pose import HeadPoseEstimator
+_head_pose_estimator = HeadPoseEstimator()
+
+_SESSION_TTL_SECONDS = 30 * 60  # 30 minutes
+
+def _evict_stale_sessions():
+    """Remove sessions inactive for longer than _SESSION_TTL_SECONDS."""
+    now = time.time()
+    stale = [sid for sid, s in _sessions.items()
+             if now - s.get("last_active_at", now) > _SESSION_TTL_SECONDS]
+    for sid in stale:
+        del _sessions[sid]
+    if stale:
+        logger.info("Evicted %d stale session(s): %s", len(stale), stale)
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -189,14 +204,12 @@ def _compute_frame_metrics(
         return PerFrameMetrics(timestamp=0.0, is_looking_away=False)
 
     from src.core.metrics import calculate_ear_both, calculate_mar, calculate_mouth_opening_ratio
-    from src.core.head_pose import HeadPoseEstimator
 
     left_ear, right_ear, avg_ear = calculate_ear_both(landmarks)
     mar = calculate_mar(landmarks)
     mouth_opening = calculate_mouth_opening_ratio(landmarks)
 
-    pose_est = HeadPoseEstimator()
-    pose = pose_est.estimate(landmarks, fw, fh)
+    pose = _head_pose_estimator.estimate(landmarks, fw, fh)
 
     is_looking_away = False
     pitch = yaw = roll = None
@@ -379,6 +392,7 @@ class VideoSessionManager:
         self.camera_id = 0
         self.video_path = None
         self.config = {}
+        self._has_viewers = threading.Event()
         
     def start(self, video_source: str, source_value: str, config: dict):
         if self.running:
@@ -393,6 +407,7 @@ class VideoSessionManager:
         _sessions[self.session_id] = {
             "id": self.session_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
+            "last_active_at": time.time(),
             "frames": [],
             "metrics": [],
             "blink_count": 0,
@@ -435,6 +450,8 @@ class VideoSessionManager:
         )
         
         def on_frame(frame_bgr):
+            if not self._has_viewers.is_set():
+                return
             ret, buffer = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ret:
                 jpeg_bytes = buffer.tobytes()
@@ -457,6 +474,7 @@ class VideoSessionManager:
                     
                 session = _sessions.get(self.session_id)
                 if session:
+                    session["last_active_at"] = time.time()
                     if not result.frame_skipped:
                         # Accumulate counters
                         session["blink_count"] = result.blink_count
@@ -602,18 +620,23 @@ async def websocket_telemetry(websocket: WebSocket):
 @app.get("/api/video-feed")
 async def video_feed():
     async def frame_generator():
-        import asyncio
-        while True:
-            if not video_manager.running:
-                await asyncio.sleep(0.1)
-                continue
-            try:
-                # Retrieve frame in a completely non-blocking manner
-                jpeg_bytes = video_manager.frame_queue.get_nowait()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-            except queue.Empty:
-                await asyncio.sleep(0.01)
+        loop = asyncio.get_event_loop()
+        video_manager._has_viewers.set()
+        try:
+            while True:
+                if not video_manager.running:
+                    await asyncio.sleep(0.1)
+                    continue
+                try:
+                    jpeg_bytes = await loop.run_in_executor(
+                        None, video_manager.frame_queue.get, True, 0.033
+                    )
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
+                except queue.Empty:
+                    pass
+        finally:
+            video_manager._has_viewers.clear()
                 
     return StreamingResponse(
         frame_generator(),
@@ -631,6 +654,7 @@ class SessionConfig(BaseModel):
 
 @app.post("/api/session/start")
 async def start_session(config: SessionConfig):
+    _evict_stale_sessions()
     source_val = config.camera_id if config.video_source == "camera" else config.video_filename
     if config.video_source == "video_file":
         if not source_val:
@@ -658,6 +682,7 @@ async def start_session(config: SessionConfig):
 
 @app.post("/api/session/stop")
 async def stop_session():
+    _evict_stale_sessions()
     video_manager.stop()
     return {"status": "stopped", "session_id": video_manager.session_id}
 
