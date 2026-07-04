@@ -106,6 +106,16 @@ export function appendLog(level, name, message, traceback = null) {
     div.innerHTML = html;
     logConsole.appendChild(div);
     
+    // Update collapsed console summary text
+    const logSummary = document.getElementById("log-summary-text");
+    if (logSummary) {
+        let levelColor = "text-slate-300";
+        if (level === "ERROR") levelColor = "text-red-400";
+        else if (level === "WARNING") levelColor = "text-amber-400";
+        else if (level === "INFO") levelColor = "text-cyan-400";
+        logSummary.innerHTML = `<span class="${levelColor}">[${level}]</span> [${name}] — ${message}`;
+    }
+    
     // Auto Scroll
     logConsole.scrollTop = logConsole.scrollHeight;
 
@@ -130,6 +140,10 @@ export function clearLogs() {
         logConsole.innerHTML = '<span class="text-slate-600 select-none">Terminal cleared.</span>';
         logCount = 0;
         logCountDisplay.textContent = "0 entries";
+    }
+    const logSummary = document.getElementById("log-summary-text");
+    if (logSummary) {
+        logSummary.innerHTML = '<span class="text-slate-600 select-none">Terminal cleared.</span>';
     }
 }
 

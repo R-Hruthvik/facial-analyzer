@@ -1,6 +1,6 @@
 // main.js - Central orchestrator module for the F1 Telemetry dashboard
 
-import { initCharts, updateCharts, resetCharts } from './charts.js?v=2';
+import { initCharts, updateCharts, resetCharts, showEnlargedChart, closeEnlargedChart, updateEnlargedChart } from './charts.js?v=2';
 import { updateTelemetryCounters, updateEngagementGauge, appendLog, generateSummary, clearLogs } from './telemetry.js?v=2';
 import { setupCanvas, resizeCanvas, drawOverlay, clearCanvas } from './canvas_overlay.js?v=2';
 
@@ -62,6 +62,9 @@ document.addEventListener("DOMContentLoaded", () => {
     setupEventListeners();
     connectWebSocket();
     setupPortal();
+    setupScrollPiP();
+    setupCollapsedModals();
+    setupChartExpansion();
 });
 
 function setupEventListeners() {
@@ -476,6 +479,7 @@ function handleTelemetryData(telemetry) {
 
         // Refresh charts data exactly once per second
         updateCharts(earHistory, marHistory, poseHistory);
+        updateEnlargedChart(earHistory, marHistory, poseHistory);
         lastChartUpdateTime = currentTime;
     }
 }
@@ -605,5 +609,119 @@ function playBootChime() {
         osc2.stop(ctx.currentTime + 1.2);
     } catch (e) {
         console.warn("Audio Context init failed:", e);
+    }
+}
+
+function setupScrollPiP() {
+    const videoWrapper = document.getElementById("video-wrapper");
+    const videoContainer = document.getElementById("video-container");
+    if (!videoWrapper || !videoContainer) return;
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) {
+                if (window.innerWidth >= 768) {
+                    videoContainer.classList.add("is-pip");
+                }
+            } else {
+                videoContainer.classList.remove("is-pip");
+            }
+        });
+    }, { threshold: 0.1 });
+
+    observer.observe(videoWrapper);
+
+    window.addEventListener("resize", () => {
+        if (window.innerWidth < 768) {
+            videoContainer.classList.remove("is-pip");
+        }
+    });
+}
+
+function setupCollapsedModals() {
+    const collapsedSettings = document.getElementById("collapsed-settings");
+    const settingsModal = document.getElementById("settings-modal");
+    const btnCloseSettings = document.getElementById("btn-close-settings");
+
+    const collapsedLogs = document.getElementById("collapsed-logs");
+    const logsModal = document.getElementById("logs-modal");
+    const btnCloseLogs = document.getElementById("btn-close-logs");
+
+    if (collapsedSettings && settingsModal) {
+        collapsedSettings.addEventListener("click", () => {
+            settingsModal.classList.remove("hidden");
+        });
+    }
+    if (btnCloseSettings && settingsModal) {
+        btnCloseSettings.addEventListener("click", (e) => {
+            e.stopPropagation();
+            settingsModal.classList.add("hidden");
+        });
+    }
+
+    if (collapsedLogs && logsModal) {
+        collapsedLogs.addEventListener("click", () => {
+            logsModal.classList.remove("hidden");
+        });
+    }
+    if (btnCloseLogs && logsModal) {
+        btnCloseLogs.addEventListener("click", (e) => {
+            e.stopPropagation();
+            logsModal.classList.add("hidden");
+        });
+    }
+
+    // Config Summary Synchronization
+    const inputs = [thresholdEar, thresholdMar, performanceSkip, performanceScale, srcWebcam, srcFile];
+    inputs.forEach(input => {
+        if (input) {
+            input.addEventListener("input", updateConfigSummary);
+            input.addEventListener("click", updateConfigSummary);
+        }
+    });
+    updateConfigSummary();
+}
+
+function updateConfigSummary() {
+    const sourceText = currentSource === "camera" ? "Webcam" : "File";
+    const ear = thresholdEar ? parseFloat(thresholdEar.value).toFixed(2) : "0.22";
+    const mar = thresholdMar ? parseFloat(thresholdMar.value).toFixed(2) : "0.60";
+    const skip = performanceSkip ? performanceSkip.value : "0";
+    const scale = performanceScale ? parseFloat(performanceScale.value).toFixed(2) : "1.00";
+    
+    const summaryText = document.getElementById("config-summary-text");
+    if (summaryText) {
+        summaryText.textContent = `${sourceText} | EAR: ${ear} | MAR: ${mar} | Skip: ${skip} | Scale: ${scale}`;
+    }
+}
+
+function setupChartExpansion() {
+    const buttons = document.querySelectorAll(".btn-expand-chart");
+    const chartModal = document.getElementById("chart-modal");
+    const btnCloseChart = document.getElementById("btn-close-chart");
+    const modalTitle = document.getElementById("chart-modal-title");
+
+    buttons.forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const chartType = btn.getAttribute("data-chart");
+            if (chartModal && modalTitle) {
+                let title = "Eye Slit Ratio (EAR)";
+                if (chartType === "mar") title = "Mouth Slit Ratio (MAR)";
+                else if (chartType === "pose") title = "Head Pose Orientation";
+                modalTitle.textContent = `Enlarged Presentation: ${title}`;
+                
+                chartModal.classList.remove("hidden");
+                // Open and render data in the enlarged chart
+                showEnlargedChart(chartType, earHistory, marHistory, poseHistory);
+            }
+        });
+    });
+
+    if (btnCloseChart && chartModal) {
+        btnCloseChart.addEventListener("click", () => {
+            chartModal.classList.add("hidden");
+            closeEnlargedChart();
+        });
     }
 }
