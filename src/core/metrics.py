@@ -20,30 +20,15 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Landmark index constants (MediaPipe Face Mesh)
-# ---------------------------------------------------------------------------
-# Left eye  (indices from MediaPipe canonical model)
 LEFT_EYE_IDX = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
-# For EAR we only need the 6 points around the slit:
-LEFT_EYE_EAR = [33, 160, 158, 133, 153, 144]      # p1–p6
+LEFT_EYE_EAR = [33, 160, 158, 133, 153, 144]
 
 RIGHT_EYE_IDX = [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382]
-RIGHT_EYE_EAR = [362, 385, 387, 263, 373, 380]     # p1–p6
+RIGHT_EYE_EAR = [362, 385, 387, 263, 373, 380]
 
-# Mouth landmarks
 MOUTH_INNER = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13]
 MOUTH_OUTER = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17]
-MOUTH_MAR = [61, 39, 0, 267, 269, 291, 375, 321]   # simplified 6-point set
-
-# ---------------------------------------------------------------------------
-# Euclidean distance (inlined via math.sqrt for perf)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Eye Aspect Ratio
-# ---------------------------------------------------------------------------
+MOUTH_MAR = [61, 39, 0, 267, 269, 291, 375, 321]
 
 def calculate_ear(landmarks: np.ndarray, eye_indices: List[int]) -> float:
     """
@@ -60,7 +45,7 @@ def calculate_ear(landmarks: np.ndarray, eye_indices: List[int]) -> float:
     -------
     float — the EAR value.
     """
-    pts = landmarks[eye_indices, :2]      # (6, 2)
+    pts = landmarks[eye_indices, :2]
     dx, dy = pts[1][0] - pts[5][0], pts[1][1] - pts[5][1]
     d1 = math.sqrt(dx * dx + dy * dy)
     dx, dy = pts[2][0] - pts[4][0], pts[2][1] - pts[4][1]
@@ -82,11 +67,6 @@ def calculate_ear_both(landmarks: np.ndarray) -> Tuple[float, float, float]:
     avg_ear = (left_ear + right_ear) / 2.0
     return left_ear, right_ear, avg_ear
 
-
-# ---------------------------------------------------------------------------
-# Mouth Aspect Ratio
-# ---------------------------------------------------------------------------
-
 def calculate_mar(landmarks: np.ndarray) -> float:
     """
     Compute the Mouth Aspect Ratio based on inner mouth vertical opening
@@ -100,10 +80,8 @@ def calculate_mouth_opening_ratio(landmarks: np.ndarray) -> float:
     Alternative metric — vertical opening of the inner mouth
     normalised by mouth width.
     """
-    # Upper inner lip (13) -> Lower inner lip (14)
     upper = landmarks[13, :2]
     lower = landmarks[14, :2]
-    # Mouth width: left corner (61) -> right corner (291)
     left = landmarks[61, :2]
     right = landmarks[291, :2]
 
@@ -112,11 +90,6 @@ def calculate_mouth_opening_ratio(landmarks: np.ndarray) -> float:
     dx, dy = left[0] - right[0], left[1] - right[1]
     width = math.sqrt(dx * dx + dy * dy)
     return float(height / (width + 1e-6))
-
-
-# ---------------------------------------------------------------------------
-# Tracking classes with temporal smoothing
-# ---------------------------------------------------------------------------
 
 class EyeAspectRatioTracker:
     """
@@ -154,18 +127,15 @@ class EyeAspectRatioTracker:
         self._history.append(ear)
         smoothed = float(np.mean(self._history))
 
-        # Check raw EAR against threshold
         if ear < self.threshold:
             self._below_counter += 1
             self._above_counter = 0
-            # Only count blink if we had enough consecutive frames below threshold
             if self._below_counter >= self.consecutive_frames and not self._blink_in_progress:
                 self._blink_count += 1
                 self._blink_in_progress = True
                 self._logger.debug("Blink detected (EAR=%.3f, frames=%d)", ear, self._below_counter)
         else:
             self._above_counter += 1
-            # Reset counter and blink state when eye opens for at least 2 frames
             if self._above_counter >= 2:
                 self._blink_in_progress = False
                 self._below_counter = 0
@@ -221,7 +191,6 @@ class MouthAspectRatioTracker:
         self._history.append(mar)
         smoothed = float(np.mean(self._history))
 
-        # Yawn logic
         if mar >= self.threshold_yawn:
             self._yawn_frames += 1
             if self._yawn_frames >= 15 and not self._yawn_in_progress:
@@ -230,10 +199,9 @@ class MouthAspectRatioTracker:
                 self._logger.debug("Yawn detected (MAR=%.3f)", mar)
         else:
             self._yawn_frames = 0
-            if mar < self.threshold_talk:  # Fully closed mouth resets yawn cooldown
+            if mar < self.threshold_talk:
                 self._yawn_in_progress = False
 
-        # Talking logic
         if self.threshold_talk <= mar < self.threshold_yawn:
             self._talk_frames += 1
             if self._talk_frames >= 1 and not self._talk_in_progress:
@@ -263,7 +231,6 @@ def calculate_gaze_distraction(landmarks: np.ndarray) -> bool:
     if len(landmarks) < 478:
         return False
         
-    # Left eye gaze (outer: 33, inner: 133, iris: 468, top: 159, bottom: 145)
     left_center_x = (landmarks[33, 0] + landmarks[133, 0]) / 2.0
     left_width = abs(landmarks[33, 0] - landmarks[133, 0]) + 1e-6
     left_offset_x = (landmarks[468, 0] - left_center_x) / left_width
@@ -272,7 +239,6 @@ def calculate_gaze_distraction(landmarks: np.ndarray) -> bool:
     left_height = abs(landmarks[159, 1] - landmarks[145, 1]) + 1e-6
     left_offset_y = (landmarks[468, 1] - left_center_y) / left_height
     
-    # Right eye gaze (outer: 263, inner: 362, iris: 473, top: 386, bottom: 374)
     right_center_x = (landmarks[263, 0] + landmarks[362, 0]) / 2.0
     right_width = abs(landmarks[263, 0] - landmarks[362, 0]) + 1e-6
     right_offset_x = (landmarks[473, 0] - right_center_x) / right_width
@@ -284,5 +250,4 @@ def calculate_gaze_distraction(landmarks: np.ndarray) -> bool:
     avg_offset_x = (abs(left_offset_x) + abs(right_offset_x)) / 2.0
     avg_offset_y = (abs(left_offset_y) + abs(right_offset_y)) / 2.0
     
-    # Gaze thresholds: horizontal displacement > 0.18 or vertical displacement > 0.28
     return avg_offset_x > 0.18 or avg_offset_y > 0.28

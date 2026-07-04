@@ -35,10 +35,6 @@ class EngagementScorer:
     def __init__(self) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def compute(
         self,
         avg_ear: float = 0.3,
@@ -62,15 +58,10 @@ class EngagementScorer:
         -------
         float between 0 and 100.
         """
-        # --- Component 1: Eye engagement (40 %) ---
-        # Healthy EAR is ~0.25-0.35.  Penalise when it drops.
         ear_score = np.clip(avg_ear / 0.30, 0.0, 1.0) * 40.0
 
-        # --- Component 2: Head-pose / focus (30 %) ---
         focus_score = (1.0 - looking_away_ratio) * 30.0
 
-        # --- Component 3: Blink-rate normalisation (15 %) ---
-        # Ideal range: 10-20 blinks/min.  Penalise extremes.
         if blink_rate < 6:
             blink_score = (blink_rate / 6.0) * 15.0
         elif blink_rate > 30:
@@ -78,8 +69,6 @@ class EngagementScorer:
         else:
             blink_score = 15.0
 
-        # --- Component 4: Mouth state (15 %) ---
-        # Low MAR (mouth closed) is normal.  High MAR indicates talking/yawn.
         mar_score = np.clip(1.0 - (avg_mar / 0.7), 0.0, 1.0) * 15.0
 
         total = ear_score + focus_score + blink_score + mar_score

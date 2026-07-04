@@ -18,7 +18,6 @@ import numpy as np
 from src.config import settings, logger
 from src.pipeline.frame_processor import FrameProcessor
 
-# Directory for saving session reports
 RESULTS_DIR = settings.BASE_DIR / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -75,7 +74,6 @@ def streaming_video_loop(
 
     Yields ``FrameResult`` objects.
     """
-    # Detect source type
     if video_source.isdigit() or isinstance(video_source, int):
         gen = processor.run_camera(int(video_source), on_frame=on_frame)
     else:

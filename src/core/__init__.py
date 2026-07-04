@@ -1,5 +1,3 @@
-# Core engine package
-
 from src.core.face_mesh_engine import FaceMeshEngine
 from src.core.metrics import (
     calculate_ear,

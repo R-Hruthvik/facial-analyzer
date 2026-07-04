@@ -613,29 +613,212 @@ function playBootChime() {
 }
 
 function setupScrollPiP() {
-    const videoWrapper = document.getElementById("video-wrapper");
     const videoContainer = document.getElementById("video-container");
-    if (!videoWrapper || !videoContainer) return;
-
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (!entry.isIntersecting) {
-                if (window.innerWidth >= 768) {
-                    videoContainer.classList.add("is-pip");
-                }
-            } else {
-                videoContainer.classList.remove("is-pip");
-            }
-        });
-    }, { threshold: 0.1 });
-
-    observer.observe(videoWrapper);
+    if (!videoContainer) return;
 
     window.addEventListener("resize", () => {
         if (window.innerWidth < 768) {
             videoContainer.classList.remove("is-pip");
+            videoContainer.style.top = "";
+            videoContainer.style.left = "";
+            videoContainer.style.right = "";
+            videoContainer.style.bottom = "";
         }
     });
+
+    makePiPDraggable(videoContainer);
+
+    // Auto-scroll snap and precise PiP logic
+    let isAutoScrolling = false;
+    let lastScrollY = window.scrollY;
+    let userInitiatedScroll = false;
+
+    const markUserScroll = () => { userInitiatedScroll = true; };
+    window.addEventListener("wheel", markUserScroll, { passive: true });
+    window.addEventListener("touchmove", markUserScroll, { passive: true });
+    window.addEventListener("keydown", (e) => {
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Space"].includes(e.code)) {
+            markUserScroll();
+        }
+    });
+
+    window.addEventListener("scroll", () => {
+        if (window.innerWidth < 768) {
+            lastScrollY = window.scrollY;
+            return;
+        }
+
+        const currentScrollY = window.scrollY;
+        const scrollDirection = currentScrollY > lastScrollY ? 'down' : 'up';
+        
+        const collapsedSettings = document.getElementById("collapsed-settings");
+        if (!collapsedSettings) return;
+        
+        const snapTarget = collapsedSettings.parentElement; 
+        const targetScrollY = snapTarget.getBoundingClientRect().top + window.scrollY - 90;
+        
+        // 1. Precise PiP Trigger Logic
+        // Trigger exactly when logs/params row hits the top threshold
+        if (currentScrollY >= targetScrollY - 5) {
+            if (!videoContainer.classList.contains("is-pip")) {
+                videoContainer.classList.add("is-pip");
+            }
+        } else {
+            if (videoContainer.classList.contains("is-pip")) {
+                videoContainer.classList.remove("is-pip");
+                // Reset positions
+                videoContainer.style.top = "";
+                videoContainer.style.left = "";
+                videoContainer.style.right = "";
+                videoContainer.style.bottom = "";
+            }
+        }
+
+        // 2. Auto-scroll snap logic
+        if (isAutoScrolling || !userInitiatedScroll) {
+            lastScrollY = currentScrollY;
+            return;
+        }
+        
+        if (scrollDirection === 'down' && currentScrollY > 10 && currentScrollY < targetScrollY - 50) {
+            isAutoScrolling = true;
+            userInitiatedScroll = false;
+            window.scrollTo({ top: targetScrollY, behavior: 'smooth' });
+            setTimeout(() => { isAutoScrolling = false; lastScrollY = window.scrollY; }, 700);
+        } else if (scrollDirection === 'up' && currentScrollY < targetScrollY - 20 && currentScrollY > 10) {
+            isAutoScrolling = true;
+            userInitiatedScroll = false;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            setTimeout(() => { isAutoScrolling = false; lastScrollY = window.scrollY; }, 700);
+        }
+        
+        lastScrollY = currentScrollY;
+    });
+}
+
+function makePiPDraggable(el) {
+    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+    
+    el.addEventListener("mousedown", dragMouseDown);
+    el.addEventListener("touchstart", dragMouseDown, { passive: false });
+    
+    function dragMouseDown(e) {
+        if (!el.classList.contains("is-pip")) return;
+        
+        // Don't drag if clicking buttons or select inputs
+        if (e.target.closest("button") || e.target.closest("select")) return;
+        
+        e.preventDefault();
+        
+        const clientX = e.type === "touchstart" ? e.touches[0].clientX : e.clientX;
+        const clientY = e.type === "touchstart" ? e.touches[0].clientY : e.clientY;
+        
+        pos3 = clientX;
+        pos4 = clientY;
+        
+        document.addEventListener("mouseup", closeDragElement);
+        document.addEventListener("touchend", closeDragElement);
+        document.addEventListener("mousemove", elementDrag);
+        document.addEventListener("touchmove", elementDrag, { passive: false });
+        el.style.transition = "none";
+    }
+    
+    function elementDrag(e) {
+        e.preventDefault();
+        
+        const clientX = e.type === "touchmove" ? e.touches[0].clientX : e.clientX;
+        const clientY = e.type === "touchmove" ? e.touches[0].clientY : e.clientY;
+        
+        pos1 = pos3 - clientX;
+        pos2 = pos4 - clientY;
+        pos3 = clientX;
+        pos4 = clientY;
+        
+        let newTop = el.offsetTop - pos2;
+        let newLeft = el.offsetLeft - pos1;
+        
+        const buffer = 10;
+        const leftBoundary = window.innerWidth >= 768 ? 112 + buffer : buffer; // 112px is sidebar width
+        const bottomBoundary = window.innerWidth < 768 ? 80 + buffer : buffer; // 80px is mobile bottom bar height
+        
+        newTop = Math.max(buffer, Math.min(window.innerHeight - el.offsetHeight - bottomBoundary, newTop));
+        newLeft = Math.max(leftBoundary, Math.min(window.innerWidth - el.offsetWidth - buffer, newLeft));
+        
+        el.style.top = newTop + "px";
+        el.style.left = newLeft + "px";
+        el.style.right = "auto";
+        el.style.bottom = "auto";
+    }
+    
+    function closeDragElement() {
+        document.removeEventListener("mouseup", closeDragElement);
+        document.removeEventListener("touchend", closeDragElement);
+        document.removeEventListener("mousemove", elementDrag);
+        document.removeEventListener("touchmove", elementDrag);
+        
+        if (el.classList.contains("is-enlarged-pip")) {
+            const chartModal = document.getElementById("chart-modal");
+            if (chartModal && !chartModal.classList.contains("hidden")) {
+                const chartCard = chartModal.querySelector(".glass-card");
+                if (chartCard) {
+                    const pipRect = el.getBoundingClientRect();
+                    const chartRect = chartCard.getBoundingClientRect();
+                    
+                    // Check intersection
+                    if (
+                        pipRect.right > chartRect.left &&
+                        pipRect.left < chartRect.right &&
+                        pipRect.bottom > chartRect.top &&
+                        pipRect.top < chartRect.bottom
+                    ) {
+                        // Add smooth transition for the snap animation
+                        el.style.transition = "all 0.3s ease-out";
+                        
+                        const distLeft = pipRect.right - chartRect.left;
+                        const distRight = chartRect.right - pipRect.left;
+                        const distTop = pipRect.bottom - chartRect.top;
+                        const distBottom = chartRect.bottom - pipRect.top;
+                        
+                        const min = Math.min(distLeft, distRight, distTop, distBottom);
+                        const buffer = 15; // 15px gap from the chart
+                        
+                        let newLeft = el.offsetLeft;
+                        let newTop = el.offsetTop;
+                        
+                        if (min === distLeft) {
+                            newLeft = chartRect.left - pipRect.width - buffer;
+                        } else if (min === distRight) {
+                            newLeft = chartRect.right + buffer;
+                        } else if (min === distTop) {
+                            newTop = chartRect.top - pipRect.height - buffer;
+                        } else if (min === distBottom) {
+                            newTop = chartRect.bottom + buffer;
+                        }
+                        
+                        // Keep within window bounds while avoiding sidebar
+                        const winBuffer = 10;
+                        const winLeftBoundary = window.innerWidth >= 768 ? 112 + winBuffer : winBuffer;
+                        const winBottomBoundary = window.innerWidth < 768 ? 80 + winBuffer : winBuffer;
+                        
+                        newTop = Math.max(winBuffer, Math.min(window.innerHeight - pipRect.height - winBottomBoundary, newTop));
+                        newLeft = Math.max(winLeftBoundary, Math.min(window.innerWidth - pipRect.width - winBuffer, newLeft));
+                        
+                        el.style.left = newLeft + "px";
+                        el.style.top = newTop + "px";
+                        
+                        // Remove transition after animation completes
+                        setTimeout(() => { el.style.transition = ""; }, 300);
+                    } else {
+                        el.style.transition = "";
+                    }
+                }
+            } else {
+                el.style.transition = "";
+            }
+        } else {
+            el.style.transition = "";
+        }
+    }
 }
 
 function setupCollapsedModals() {
@@ -700,6 +883,7 @@ function setupChartExpansion() {
     const chartModal = document.getElementById("chart-modal");
     const btnCloseChart = document.getElementById("btn-close-chart");
     const modalTitle = document.getElementById("chart-modal-title");
+    const videoContainer = document.getElementById("video-container");
 
     buttons.forEach(btn => {
         btn.addEventListener("click", (e) => {
@@ -712,6 +896,8 @@ function setupChartExpansion() {
                 modalTitle.textContent = `Enlarged Presentation: ${title}`;
                 
                 chartModal.classList.remove("hidden");
+                if (videoContainer) videoContainer.classList.add("is-enlarged-pip");
+                
                 // Open and render data in the enlarged chart
                 showEnlargedChart(chartType, earHistory, marHistory, poseHistory);
             }
@@ -721,6 +907,7 @@ function setupChartExpansion() {
     if (btnCloseChart && chartModal) {
         btnCloseChart.addEventListener("click", () => {
             chartModal.classList.add("hidden");
+            if (videoContainer) videoContainer.classList.remove("is-enlarged-pip");
             closeEnlargedChart();
         });
     }

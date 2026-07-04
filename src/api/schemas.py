@@ -10,10 +10,6 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
-# Frame / Stream ingestion
-# ---------------------------------------------------------------------------
-
 class FrameData(BaseModel):
     """
     A single frame's worth of landmark data submitted to the processing
@@ -35,10 +31,6 @@ class FrameBatch(BaseModel):
     """Batch of frames for off-line video processing."""
     frames: List[FrameData]
 
-
-# ---------------------------------------------------------------------------
-# Metrics & Telemetry
-# ---------------------------------------------------------------------------
 
 class PerFrameMetrics(BaseModel):
     timestamp: float
@@ -82,10 +74,6 @@ class EngagementSummary(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
 
-
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
 
 class HealthResponse(BaseModel):
     status: str = "ok"

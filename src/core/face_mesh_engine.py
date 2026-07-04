@@ -24,18 +24,12 @@ from mediapipe.tasks.python import vision
 
 from src.config import settings, logger
 
-# ---------------------------------------------------------------------------
-# Model file
-# ---------------------------------------------------------------------------
 _MODEL_FILENAME = "face_landmarker.task"
 _MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
 
-# ---------------------------------------------------------------------------
-# Eye contour connections — extracted from FaceLandmarksConnections
-# ---------------------------------------------------------------------------
 FACEMESH_LEFT_EYE_INDICES = [
     (c.start, c.end)
     for c in vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYE
@@ -45,18 +39,15 @@ FACEMESH_RIGHT_EYE_INDICES = [
     for c in vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE
 ]
 
-# Indices used for head-pose estimation (6 standard points).
-# First 468 landmarks are identical between the old 468-point and new 478-point models.
 HEAD_POSE_LANDMARKS = [
-    1,     # nose tip
-    4,     # nose bridge
-    33,    # left eye outer corner
-    263,   # right eye outer corner
-    133,   # left eye inner corner
-    362,   # right eye inner corner
+    1,
+    4,
+    33,
+    263,
+    133,
+    362,
 ]
 
-# Number of landmarks in the new model
 NUM_LANDMARKS = 478
 
 
@@ -85,9 +76,7 @@ class FaceMeshEngine:
     def __init__(self, model_path: Optional[str] = None) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
 
-        # Resolve model path — default to project root or CWD
         if model_path is None:
-            # Search locations in order
             for candidate in (
                 os.path.join(str(settings.BASE_DIR), _MODEL_FILENAME),
                 os.path.join(os.getcwd(), _MODEL_FILENAME),
@@ -96,12 +85,10 @@ class FaceMeshEngine:
                     model_path = candidate
                     break
             else:
-                # Fall back to project root and download
                 model_path = os.path.join(str(settings.BASE_DIR), _MODEL_FILENAME)
 
         self._model_path = _ensure_model(model_path)
 
-        # Build FaceLandmarker options
         base_options = python.BaseOptions(
             model_asset_path=self._model_path,
         )
@@ -116,7 +103,6 @@ class FaceMeshEngine:
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
 
-        # Performance bookkeeping
         self._frame_count: int = 0
         self._inference_times: deque[float] = deque(maxlen=100)
         self._avg_inference_ms: float = 0.0
@@ -127,10 +113,6 @@ class FaceMeshEngine:
             self._model_path,
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def process(self, frame_rgb: np.ndarray) -> Optional[vision.FaceLandmarkerResult]:
         """
         Run MediaPipe inference on an RGB frame.
@@ -139,7 +121,6 @@ class FaceMeshEngine:
         -------
         ``FaceLandmarkerResult`` with ``face_landmarks``, or ``None``.
         """
-        # Convert numpy array to MediaPipe Image
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
         t0 = time.perf_counter()
@@ -189,7 +170,6 @@ class FaceMeshEngine:
         denorm = landmarks.copy()
         denorm[:, 0] *= frame_w
         denorm[:, 1] *= frame_h
-        # z remains in MediaPipe's metric scale (approx mm)
         return denorm
 
     @staticmethod
@@ -223,10 +203,6 @@ class FaceMeshEngine:
                 landmarks[end_idx, 1] * h
             )
             cv2.line(frame, (sx, sy), (ex, ey), color, thickness)
-
-    # ------------------------------------------------------------------
-    # Performance helpers
-    # ------------------------------------------------------------------
 
     @property
     def avg_inference_ms(self) -> float:

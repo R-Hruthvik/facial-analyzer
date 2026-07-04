@@ -12,9 +12,6 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
-# Use RLock (reentrant) so emit() can call periodic_cleanup() safely
-# while already holding the lock.
-
 
 @dataclass
 class LogEntry:
@@ -68,7 +65,6 @@ class DashboardLogHandler(logging.Handler):
 
             entry = None
             with self._lock:
-                # Create log entry
                 entry = LogEntry(
                     timestamp=datetime.now(),
                     level=record.levelname,
@@ -81,18 +77,13 @@ class DashboardLogHandler(logging.Handler):
                     traceback=exc_text
                 )
                 
-                # Add to buffer
                 self.log_entries.append(entry)
                 
-                # Trim if too large - keep only recent entries
                 if len(self.log_entries) > self.max_entries:
-                    # Keep the most recent entries
                     self.log_entries = self.log_entries[-self.max_entries:]
                     
-                # Trigger periodic cleanup
                 self.periodic_cleanup()
                 
-            # Notify listeners outside the lock to prevent deadlock
             if entry is not None:
                 for listener in self.listeners:
                     try:
@@ -101,7 +92,6 @@ class DashboardLogHandler(logging.Handler):
                         pass
                     
         except Exception:
-            # Don't let logging errors break the application
             pass
     
     def get_recent_logs(self, level_filter: str = None, limit: int = 100) -> List[LogEntry]:
@@ -109,11 +99,9 @@ class DashboardLogHandler(logging.Handler):
         with self._lock:
             logs = self.log_entries.copy()
             
-            # Apply level filter
             if level_filter:
                 logs = [log for log in logs if log.level == level_filter]
             
-            # Return most recent
             return logs[-limit:]
     
     def clear(self) -> None:
@@ -136,7 +124,6 @@ class DashboardLogHandler(logging.Handler):
     
     def periodic_cleanup(self) -> None:
         """Perform periodic cleanup to prevent unbounded log growth."""
-        # Clean up every 100 new entries
         if self.get_log_count() % 100 == 0:
             self.cleanup_old_logs(keep_recent=500)
 
@@ -152,7 +139,6 @@ class LogManager:
         self._logger.addHandler(self._handler)
         self._logger.setLevel(logging.INFO)
         
-        # Prevent duplicate logs
         self._logger.propagate = False
     
     def get_handler(self) -> DashboardLogHandler:
@@ -178,7 +164,6 @@ class LogManager:
         self._logger.info("  OpenCV: %s", cv2.__version__)
         self._logger.info("  MediaPipe: Available")
         
-        # Log camera availability
         try:
             import mediapipe as mp
             self._logger.info("  MediaPipe version: %s", mp.__version__)
@@ -186,7 +171,6 @@ class LogManager:
             self._logger.warning("  MediaPipe not available")
 
 
-# Global log manager instance
 _log_manager = LogManager()
 
 

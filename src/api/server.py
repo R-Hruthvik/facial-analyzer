@@ -40,10 +40,6 @@ from src.config import settings, logger
 from src.pipeline.engagement_scorer import EngagementScorer
 from src.pipeline.prompt_mapper import PromptMapper
 
-# ---------------------------------------------------------------------------
-# App initialisation
-# ---------------------------------------------------------------------------
-
 app = FastAPI(
     title="Facial Engagement Analyzer API",
     version="1.0.0",
@@ -57,11 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------------------------------
-# In-memory session store & Global ML Engine
-# ---------------------------------------------------------------------------
-# In production, replace with Redis / PostgreSQL.
 
 _sessions: Dict[str, Dict] = {}
 _start_time: float = time.time()
@@ -86,10 +77,6 @@ def _evict_stale_sessions():
         logger.info("Evicted %d stale session(s): %s", len(stale), stale)
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
 @app.get("/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(
@@ -105,7 +92,6 @@ async def process_frame(payload: FrameData):
     """
     session_id = payload.session_id
 
-    # Initialise session if new
     if session_id not in _sessions:
         _sessions[session_id] = {
             "id": session_id,
@@ -119,23 +105,20 @@ async def process_frame(payload: FrameData):
 
     session = _sessions[session_id]
 
-    # Convert landmarks to numpy
     landmarks_arr = None
     if payload.landmarks and len(payload.landmarks) in (468, 478):
         landmarks_arr = np.array(payload.landmarks, dtype=np.float32)
 
-    # Compute per-frame metrics
     metrics = _compute_frame_metrics(
         landmarks_arr, payload.frame_width, payload.frame_height
     )
     metrics.timestamp = payload.timestamp
     session["metrics"].append(metrics)
 
-    # Accumulate counters
     ear = metrics.avg_ear
     if ear is not None:
         if ear < settings.EAR_THRESHOLD:
-            session["blink_count"] += 1   # simplified blink detection
+            session["blink_count"] += 1
     if metrics.is_looking_away:
         session["looking_away_count"] += 1
 
@@ -192,10 +175,6 @@ async def telemetry_live(session_id: str):
     }
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _compute_frame_metrics(
     landmarks: Optional[np.ndarray], fw: int, fh: int
 ) -> PerFrameMetrics:
@@ -249,8 +228,6 @@ def _aggregate_summary(
     pitches = [m.pitch for m in metrics if m.pitch is not None]
     yaws = [m.yaw for m in metrics if m.yaw is not None]
     rolls = [m.roll for m in metrics if m.roll is not None]
-    # For live sessions, looking_away_count is accumulated in seconds.
-    # Fallback to estimating seconds from metrics if not present.
     duration = (
         metrics[-1].timestamp - metrics[0].timestamp
         if len(metrics) > 1 and metrics[-1].timestamp > 0
@@ -261,7 +238,6 @@ def _aggregate_summary(
 
     away_count = session.get("looking_away_count", 0)
     if away_count == 0 and len(metrics) > 0:
-        # Fallback approximation: frames / 30
         away_count = int(sum(1 for m in metrics if m.is_looking_away) / 30.0)
 
     away_ratio = away_count / max(duration, 1.0)
@@ -270,7 +246,6 @@ def _aggregate_summary(
         session["blink_count"] / (duration / 60.0) if duration > 0 else 0.0
     )
 
-    # Compute engagement score
     score = _scorer.compute(
         avg_ear=float(np.mean(ears)) if ears else 0.0,
         min_ear=float(np.min(ears)) if ears else 0.0,
@@ -279,7 +254,6 @@ def _aggregate_summary(
         blink_rate=blink_rate,
     )
 
-    # Generate natural-language insights
     insights = _mapper.generate_insights(
         avg_ear=float(np.mean(ears)) if ears else None,
         min_ear=float(np.min(ears)) if ears else None,
@@ -313,10 +287,6 @@ def _aggregate_summary(
         ended_at=datetime.now(timezone.utc).isoformat(),
     )
 
-
-# ---------------------------------------------------------------------------
-# Background processing and WebSocket globals
-# ---------------------------------------------------------------------------
 
 active_websockets = set()
 main_event_loop = None
@@ -355,7 +325,6 @@ def log_listener(entry):
         main_event_loop
     )
 
-# Global pre-warmed camera and engine to fix late launches
 prewarmed_camera = None
 
 @app.on_event("startup")
@@ -372,7 +341,7 @@ async def startup_event():
         global _shared_face_engine
         try:
             from src.core.face_mesh_engine import FaceMeshEngine
-            _shared_face_engine = FaceMeshEngine()  # Loads the TF Lite model into memory and caches it
+            _shared_face_engine = FaceMeshEngine()
             logger.info("Pre-warm complete.")
         except Exception as e:
             logger.error("Failed to pre-warm: %s", e)
@@ -403,7 +372,6 @@ class VideoSessionManager:
         self.config = config
         self.session_id = str(uuid.uuid4())[:8]
         
-        # Initialize session in global store
         _sessions[self.session_id] = {
             "id": self.session_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -476,7 +444,6 @@ class VideoSessionManager:
                 if session:
                     session["last_active_at"] = time.time()
                     if not result.frame_skipped:
-                        # Accumulate counters
                         session["blink_count"] = result.blink_count
                         session["yawn_count"] = result.yawn_count
                         session["looking_away_count"] = int(result.looking_away_seconds)
@@ -499,7 +466,6 @@ class VideoSessionManager:
                         )
                         session["metrics"].append(metrics)
                         
-                    # Broadcast telemetry
                     payload = {
                         "type": "telemetry",
                         "data": {
@@ -533,7 +499,6 @@ class VideoSessionManager:
                         )
                         fut.add_done_callback(_log_broadcast_errors)
             
-            # End of stream indicator
             payload = {
                 "type": "finished",
                 "data": {
@@ -560,10 +525,6 @@ class VideoSessionManager:
 
 video_manager = VideoSessionManager()
 
-# ---------------------------------------------------------------------------
-# Frontend WebSocket & Streaming Endpoints
-# ---------------------------------------------------------------------------
-
 @app.get("/api/session/verify-camera")
 async def verify_camera():
     """Verify if the default webcam is physically available and not locked by another process."""
@@ -589,7 +550,6 @@ async def websocket_telemetry(websocket: WebSocket):
     await websocket.accept()
     active_websockets.add(websocket)
     
-    # Send history of logs to this client
     from src.dashboard.logs import get_log_manager
     log_manager = get_log_manager()
     recent = log_manager.get_recent_logs(limit=50)
@@ -610,7 +570,6 @@ async def websocket_telemetry(websocket: WebSocket):
         
     try:
         while True:
-            # Keep open
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
@@ -705,7 +664,6 @@ async def upload_video(file: UploadFile = File(...)):
     logger.info("Video file '%s' uploaded successfully to %s", file.filename, file_path)
     return {"filename": file.filename}
 
-# Serve static dashboard client
 import os
 os.makedirs("src/static", exist_ok=True)
 app.mount("/", StaticFiles(directory="src/static", html=True), name="static")

@@ -18,22 +18,17 @@ import numpy as np
 from src.config import settings, logger
 from src.core.face_mesh_engine import HEAD_POSE_LANDMARKS
 
-# ---------------------------------------------------------------------------
-# 3D reference points in an approximate canonical face model (metric units).
-# These values come from the MediaPipe canonical face model.
-# ---------------------------------------------------------------------------
 _3D_REF_POINTS = np.array(
     [
-        [0.0, 0.0, 0.0],        # 1   — Nose tip
-        [0.0, -0.08, -0.06],    # 4   — Nose bridge
-        [-0.225, -0.17, -0.12], # 33  — Left eye outer corner
-        [0.225, -0.17, -0.12],  # 263 — Right eye outer corner
-        [-0.08, -0.17, -0.09],  # 133 — Left eye inner corner
-        [0.08, -0.17, -0.09],   # 362 — Right eye inner corner
+        [0.0, 0.0, 0.0],
+        [0.0, -0.08, -0.06],
+        [-0.225, -0.17, -0.12],
+        [0.225, -0.17, -0.12],
+        [-0.08, -0.17, -0.09],
+        [0.08, -0.17, -0.09],
     ],
     dtype=np.float64,
 )
-
 
 class HeadPoseEstimator:
     """
@@ -45,16 +40,9 @@ class HeadPoseEstimator:
     def __init__(self) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
 
-        # Camera matrix — approximated for a 640×480 viewport
-        # Will be re-calibrated on first call to ``estimate`` based on actual
-        # frame dimensions.
         self._camera_matrix: Optional[np.ndarray] = None
         self._dist_coeffs = np.zeros((4, 1), dtype=np.float64)
         self._logger.info("HeadPoseEstimator initialised.")
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def estimate(
         self, landmarks: np.ndarray, frame_w: int, frame_h: int
@@ -71,17 +59,14 @@ class HeadPoseEstimator:
         -------
         dict with keys ``pitch``, ``yaw``, ``roll``, or ``None`` if PnP fails.
         """
-        # Lazily build camera matrix
         if self._camera_matrix is None or self._camera_matrix.shape != (3, 3):
             self._build_camera_matrix(frame_w, frame_h)
 
-        # Gather 2D pixel coordinates for the 6 reference landmarks
         img_pts = landmarks[HEAD_POSE_LANDMARKS, :2].copy()
-        img_pts[:, 0] *= frame_w   # denormalise x
-        img_pts[:, 1] *= frame_h   # denormalise y
+        img_pts[:, 0] *= frame_w
+        img_pts[:, 1] *= frame_h
         img_pts = img_pts.astype(np.float64)
 
-        # Solve PnP
         success, rvec, tvec = cv2.solvePnP(
             _3D_REF_POINTS,
             img_pts,
@@ -93,25 +78,21 @@ class HeadPoseEstimator:
             self._logger.warning("solvePnP failed to converge.")
             return None
 
-        # Convert rotation vector to Euler angles
         rmat, _ = cv2.Rodrigues(rvec)
         angles = self._rotation_matrix_to_euler(rmat)
 
         pitch, yaw, roll = float(angles[0]), float(angles[1]), float(angles[2])
 
-        # Adjust roll if it's centered around 180 (due to canonical model orientation)
         if roll > 90:
             roll -= 180
         elif roll < -90:
             roll += 180
 
-        # Adjust pitch if it's centered around 180
         if pitch > 90:
             pitch -= 180
         elif pitch < -90:
             pitch += 180
 
-        # Adjust yaw if it's centered around 180
         if yaw > 90:
             yaw -= 180
         elif yaw < -90:
@@ -119,13 +100,12 @@ class HeadPoseEstimator:
 
         logger.debug(f"Head pose - Pitch: {pitch:.1f}, Yaw: {yaw:.1f}, Roll: {roll:.1f}")
 
-        # Project 3D axes (Origin, X, Y, Z) to 2D image coordinates for client canvas drawing
         axis_len = 0.15
         axis_points = np.array([
-            [0.0, 0.0, 0.0],          # Origin (nose tip)
-            [axis_len, 0.0, 0.0],     # X axis (Pitch / Red)
-            [0.0, axis_len, 0.0],     # Y axis (Yaw / Green)
-            [0.0, 0.0, axis_len],     # Z axis (Roll / Blue)
+            [0.0, 0.0, 0.0],
+            [axis_len, 0.0, 0.0],
+            [0.0, axis_len, 0.0],
+            [0.0, 0.0, axis_len],
         ], dtype=np.float64)
 
         imgpts, _ = cv2.projectPoints(
@@ -149,10 +129,6 @@ class HeadPoseEstimator:
             "roll": roll,
             "pose_axes_2d": pose_axes_2d,
         }
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _build_camera_matrix(self, w: int, h: int) -> None:
         """
